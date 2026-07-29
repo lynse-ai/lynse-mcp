@@ -1,0 +1,44 @@
+{
+  "name": "@lynse.ai/lynse-mcp",
+  "version": "0.0.1",
+  "description": "灵光记 Lynse 的独立 MCP 服务仓库，提供 meetings、folders 和 todos 的标准 Model Context Protocol 接口。",
+  "main": "lynse_mcp.py",
+  "bin": {
+    "lynse-mcp": "./bin/lynse-mcp.js"
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v"
+  },
+  "keywords": [
+    "lynse",
+    "mcp",
+    "model-context-protocol",
+    "meetings",
+    "todos",
+    "folders",
+    "ai"
+  ],
+  "author": "lynse.ai",
+  "license": "MIT",
+  "homepage": "https://www.lynse.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lynse-ai/lynse-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lynse-ai/lynse-mcp/issues"
+  },
+  "files": [
+    "lynse.py",
+    "lynse_mcp.py",
+    "bin/lynse-mcp.js",
+    "requirements.txt",
+    "requirements-mcp.txt",
+    "README.md",
+    "MCP.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "python": ">=3.11"
+  }
+}
