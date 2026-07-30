@@ -15,6 +15,7 @@ Lynse CLI - 核心 API 封装模块
 """
 
 import base64
+import mimetypes
 import os
 import sys
 import json
@@ -1659,6 +1660,71 @@ class LynseAPI:
         safe_id = self._sanitize_param(file_id, 'safe')
         return self._request('GET', '/api/business/file/info',
                             params={'fileId': safe_id})
+
+    def get_audio_file(self, file_id: str) -> Dict[str, Any]:
+        """获取会议音频的预签名下载地址和文件元数据。"""
+        safe_id = self._sanitize_param(file_id, 'safe')
+        info_response = self.get_file_info(safe_id)
+        info = info_response.get('data') if isinstance(info_response, dict) else {}
+        info = info if isinstance(info, dict) else {}
+        download_response = self._request(
+            'GET',
+            '/api/business/file/presign/download',
+            params={'fileId': safe_id},
+        )
+        download_data = (
+            download_response.get('data')
+            if isinstance(download_response, dict)
+            else download_response
+        )
+        if isinstance(download_data, dict):
+            download_url = download_data.get('url')
+        else:
+            download_url = download_data
+        download_url = str(download_url or info.get('url') or '').strip()
+        try:
+            parsed_url = urlsplit(download_url)
+        except ValueError:
+            parsed_url = None
+        if not parsed_url or parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc:
+            raise LynseAPIError(
+                'Lynse did not return a valid audio download URL. '
+                'The recording may still be processing or unavailable.'
+            )
+
+        file_name = str(
+            info.get('originalFilename') or info.get('filename') or f'{safe_id}.audio'
+        ).strip()
+        mime_type = str(info.get('contentType') or '').strip().lower()
+        if not mime_type:
+            mime_type = (
+                mimetypes.guess_type(file_name)[0]
+                or mimetypes.guess_type(parsed_url.path)[0]
+                or 'application/octet-stream'
+            )
+        raw_size = info.get('size')
+        try:
+            size = max(0, int(raw_size)) if raw_size not in (None, '') else None
+        except (TypeError, ValueError):
+            size = None
+
+        return {
+            'code': download_response.get('code', 200)
+            if isinstance(download_response, dict)
+            else 200,
+            'msg': download_response.get(
+                'msg', download_response.get('message', 'SUCCESS')
+            )
+            if isinstance(download_response, dict)
+            else 'SUCCESS',
+            'data': {
+                'fileId': safe_id,
+                'fileName': file_name,
+                'mimeType': mime_type,
+                'size': size,
+                'url': download_url,
+            },
+        }
 
     def get_conclusion(self, file_id: str) -> Dict[str, Any]:
         """获取文件总结"""

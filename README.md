@@ -2,11 +2,11 @@
 
 `lynse-mcp` 是灵光记 Lynse 的独立 Model Context Protocol 服务仓库。
 
-它把 Lynse 的会议、文件夹和待办能力暴露给 Claude、Cursor、VS Code 等 MCP 客户端使用。
+它把 Lynse 的会议、音频文件、文件夹和待办能力暴露给 Claude、Cursor、VS Code 等 MCP 客户端使用。
 
 ## 版本
 
-当前版本从 `0.0.1` 开始。
+当前版本为 `0.0.3`。
 
 ## 安装
 
@@ -17,7 +17,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-mcp.txt
 ```
 
-如果你还没有 Lynse API 客户端环境，请先在现有 Lynse 账号里完成登录配置。
+首次使用需要授权时，客户端会打开本机安全页面输入 Lynse Key。Key 不会进入聊天记录或 MCP 工具参数。
 
 ## 运行
 
@@ -48,5 +48,7 @@ Streamable HTTP 模式：
 
 ## 说明
 
+- `get_meeting_audio` 通过 Lynse 预签名下载接口返回可访问的会议音频资源。
+- `reset_lynse_key` 在用户确认后打开安全页面；新 Key 验证成功才会替换旧 Key。
 - 所有写入和删除类工具都要求显式确认。
 - 这是一个独立仓库，不再包含 `lynse-cli` 的命令入口。
