@@ -9,8 +9,8 @@ import sys
 from typing import Annotated, Any, Callable, Literal
 
 try:
-    from mcp.server import FastMCP
-    from mcp.server.fastmcp import Context
+    from mcp.server import MCPServer
+    from mcp.server.mcpserver import Context
 except ImportError:
     print(
         "Error: lynse-mcp requires MCP Python SDK 2.x. "
@@ -24,7 +24,7 @@ from pydantic import Field
 from lynse import LynseAPI, LynseAPIError
 from lynse_auth import LocalAuthFlow, auth_status
 
-MCP_VERSION = "0.0.3"
+MCP_VERSION = "0.0.4"
 
 
 Days = Annotated[int, Field(ge=1, le=3650, description="Number of recent days to query.")]
@@ -240,10 +240,10 @@ class LynseMCPTools:
                 "Lynse meeting audio file. The signed download link may expire; "
                 "call get_meeting_audio again to refresh it."
             ),
-            mimeType=mime_type,
+            mime_type=mime_type,
             size=size,
         )
-        return CallToolResult(content=[resource], structuredContent=result)
+        return CallToolResult(content=[resource], structured_content=result)
 
     async def list_folders(self, ctx: Context) -> dict[str, Any]:
         """List Lynse meeting folders."""
@@ -348,9 +348,9 @@ def create_server(
     api_factory: Callable[[], LynseAPI] = LynseAPI,
     auth_status_fn: Callable[[], dict[str, object]] = auth_status,
     auth_flow_factory: Callable[[], LocalAuthFlow] = LocalAuthFlow,
-) -> FastMCP:
+) -> MCPServer:
     """Create a Lynse MCP server, optionally with an injected API for tests."""
-    server = FastMCP(
+    server = MCPServer(
         "lynse-mcp",
         instructions=(
             "Access the user's Lynse meetings, audio files, summaries, transcripts, "
@@ -407,14 +407,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000, help="HTTP bind port.")
     args = parser.parse_args()
     server = create_server()
-    server.settings.host = args.host
-    server.settings.port = args.port
 
     try:
         if args.transport == "stdio":
             server.run()
         else:
-            server.run(transport="streamable-http")
+            server.run("streamable-http", host=args.host, port=args.port)
     except KeyboardInterrupt:
         pass
 

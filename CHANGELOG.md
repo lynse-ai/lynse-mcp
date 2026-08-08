@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.4 (2026-08-08)
+
+### Changed
+
+- Migrate the server entrypoint from `FastMCP` to `MCPServer` to match the official MCP Python SDK v2 stable APIs.
+- Update streamable HTTP startup to pass transport host and port through `run()`, matching the current SDK contract.
+- Switch tests to the first-class `Client(server)` pattern and v2 snake_case result fields such as `is_error`, `structured_content`, and `mime_type`.
+
 ## 0.0.3 (2026-07-30)
 
 ### New Features

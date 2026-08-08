@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp import Client
 
 from lynse import LynseAPI
 from lynse_mcp import LynseMCPTools, create_server
@@ -101,15 +101,13 @@ class LynseMCPToolTests(unittest.TestCase):
         server = create_server(lambda: api, authorized)
 
         async def run():
-            async with create_connected_server_and_client_session(
-                server, raise_exceptions=True
-            ) as client:
+            async with Client(server) as client:
                 return await client.call_tool("list_meetings", {"days": 3})
 
         result = asyncio.run(run())
 
-        self.assertFalse(result.isError)
-        self.assertEqual(result.structuredContent["data"][0]["id"], "meeting-1")
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["data"][0]["id"], "meeting-1")
         self.assertEqual(api.calls, [("list", 3)])
 
     def test_audio_tool_returns_resource_link(self):
@@ -117,9 +115,7 @@ class LynseMCPToolTests(unittest.TestCase):
         server = create_server(lambda: api, authorized)
 
         async def run():
-            async with create_connected_server_and_client_session(
-                server, raise_exceptions=True
-            ) as client:
+            async with Client(server) as client:
                 return await client.call_tool(
                     "get_meeting_audio",
                     {"file_id": "meeting-1"},
@@ -127,11 +123,11 @@ class LynseMCPToolTests(unittest.TestCase):
 
         result = asyncio.run(run())
 
-        self.assertFalse(result.isError)
+        self.assertFalse(result.is_error)
         self.assertEqual(result.content[0].type, "resource_link")
         self.assertEqual(result.content[0].name, "meeting.m4a")
-        self.assertEqual(result.content[0].mimeType, "audio/mp4")
-        self.assertEqual(result.structuredContent["data"]["size"], 1024)
+        self.assertEqual(result.content[0].mime_type, "audio/mp4")
+        self.assertEqual(result.structured_content["data"]["size"], 1024)
         self.assertEqual(api.calls, [("audio", "meeting-1")])
 
     def test_reset_key_validates_replacement_before_switching_api(self):

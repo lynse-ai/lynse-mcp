@@ -1,6 +1,6 @@
 {
   "name": "@lynse.ai/lynse-mcp",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "灵光记 Lynse 的独立 MCP 服务仓库，提供会议、音频、文件夹和待办的 Model Context Protocol 接口。",
   "main": "lynse_mcp.py",
   "bin": {
