@@ -29,7 +29,6 @@
     "url": "https://github.com/lynse-ai/lynse-mcp/issues"
   },
   "files": [
-    "lynse.py",
     "lynse_auth.py",
     "lynse_mcp.py",
     "bin/lynse-mcp.js",

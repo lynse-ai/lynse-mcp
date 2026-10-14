@@ -21,7 +21,7 @@ except ImportError:
 from mcp.types import CallToolResult, ResourceLink, ToolAnnotations
 from pydantic import Field
 
-from lynse import LynseAPI, LynseAPIError
+from lynse import LynseAPI, LynseAPIError, TRANSCRIPTION_OPERATIONS
 from lynse_auth import LocalAuthFlow, auth_status
 
 MCP_VERSION = "0.0.4"
@@ -172,21 +172,21 @@ class LynseMCPTools:
             )
 
     @staticmethod
-    def _call(operation: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
+    async def _call(operation: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
         try:
-            return operation(*args, **kwargs)
+            return await asyncio.to_thread(operation, *args, **kwargs)
         except LynseAPIError as exc:
             raise ValueError(exc.message) from exc
 
     async def get_current_user(self, ctx: Context) -> dict[str, Any]:
         """Get the current Lynse account profile."""
         await self._ensure_authorized(ctx)
-        return self._call(self.api.get_current_customer)
+        return await self._call(self.api.get_current_customer)
 
     async def list_meetings(self, ctx: Context, days: Days = 7) -> dict[str, Any]:
         """List meetings recorded during the last N days."""
         await self._ensure_authorized(ctx)
-        return self._call(self.api.list_files_by_time_range, days)
+        return await self._call(self.api.list_files_by_time_range, days)
 
     async def search_meetings(
         self,
@@ -197,7 +197,7 @@ class LynseMCPTools:
     ) -> dict[str, Any]:
         """Search meetings by title."""
         await self._ensure_authorized(ctx)
-        return self._call(self.api.search_files, keyword, page=page, page_size=page_size)
+        return await self._call(self.api.search_files, keyword, page=page, page_size=page_size)
 
     async def get_meeting(
         self,
@@ -213,7 +213,7 @@ class LynseMCPTools:
             "outline": self.api.get_outline,
             "transcript": self.api.get_transcription_text,
         }
-        return self._call(operations[content], file_id)
+        return await self._call(operations[content], file_id)
 
     async def get_meeting_audio(
         self,
@@ -222,7 +222,7 @@ class LynseMCPTools:
     ) -> CallToolResult:
         """Get a meeting audio file as an MCP resource link."""
         await self._ensure_authorized(ctx)
-        result = self._call(self.api.get_audio_file, file_id)
+        result = await self._call(self.api.get_audio_file, file_id)
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, dict) or not data.get("url"):
             raise ValueError("Lynse did not return an audio file URL for this meeting.")
@@ -245,10 +245,57 @@ class LynseMCPTools:
         )
         return CallToolResult(content=[resource], structured_content=result)
 
+    async def transcribe_meeting(
+        self,
+        ctx: Context,
+        file_id: Identifier,
+        confirm: bool,
+        template_id: Identifier | None = None,
+        model_id: Identifier | None = None,
+        language_id: Identifier | None = None,
+    ) -> dict[str, Any]:
+        """Submit cloud transcription and summary; may consume credits. A task ID means submitted, not completed."""
+        self._confirmed(confirm, "Submitting transcription and summary (may consume credits)")
+        await self._ensure_authorized(ctx)
+        return await self._call(self.api.transcribe_file, file_id,
+                                template_id=template_id, model_id=model_id, language_id=language_id)
+
+    async def get_transcription_status(
+        self,
+        ctx: Context,
+        file_ids: Annotated[list[Identifier], Field(min_length=1, max_length=TRANSCRIPTION_OPERATIONS['get_transcription_status']['max_batch'])],
+    ) -> dict[str, Any]:
+        """Read cloud transcription status for 1-100 file IDs without submitting tasks."""
+        await self._ensure_authorized(ctx)
+        return await self._call(self.api.get_transcription_status, file_ids)
+
+    async def auto_transcribe_new_recordings(
+        self,
+        ctx: Context,
+        confirm: bool,
+        template_id: Identifier | None = None,
+        model_id: Identifier | None = None,
+        language_id: Identifier | None = None,
+    ) -> dict[str, Any]:
+        """Run one scan of new cloud audio. First call skips existing files; later calls may consume credits. Repeat via an authorized scheduler; this does not start a background watcher. Inspect needsReview before retrying."""
+        self._confirmed(confirm, "Automatically transcribing new recordings (may consume credits)")
+        await self._ensure_authorized(ctx)
+        result = await self._call(self.api.auto_transcribe_new_recordings,
+                                  template_id=template_id, model_id=model_id, language_id=language_id)
+        # The shared CLI retains diagnostics locally; MCP must not expose server
+        # filesystem paths or upstream error bodies to remote clients.
+        data = dict(result.get('data') or {})
+        data.pop('stateFile', None)
+        data['needsReview'] = [
+            {key: value for key, value in item.items() if key != 'error'}
+            for item in data.get('needsReview', [])
+        ]
+        return {**result, 'data': data}
+
     async def list_folders(self, ctx: Context) -> dict[str, Any]:
         """List Lynse meeting folders."""
         await self._ensure_authorized(ctx)
-        return self._call(self.api.list_folders)
+        return await self._call(self.api.list_folders)
 
     async def list_todos(
         self,
@@ -259,7 +306,7 @@ class LynseMCPTools:
     ) -> dict[str, Any]:
         """List Lynse todos, optionally filtered by completion status."""
         await self._ensure_authorized(ctx)
-        return self._call(self.api.list_todos, status=status, page_num=page, page_size=page_size)
+        return await self._call(self.api.list_todos, status=status, page_num=page, page_size=page_size)
 
     async def plan_meeting_organization(
         self,
@@ -269,7 +316,7 @@ class LynseMCPTools:
     ) -> dict[str, Any]:
         """Build a folder organization plan without changing Lynse data."""
         await self._ensure_authorized(ctx)
-        return self._call(
+        return await self._call(
             self.api.organize_meetings,
             days=days,
             execute=False,
@@ -286,7 +333,7 @@ class LynseMCPTools:
         """Create folders and move meetings according to the organization plan."""
         self._confirmed(confirm, "Applying the meeting organization plan")
         await self._ensure_authorized(ctx)
-        return self._call(
+        return await self._call(
             self.api.organize_meetings,
             days=days,
             execute=True,
@@ -304,7 +351,7 @@ class LynseMCPTools:
         """Create a Lynse meeting folder."""
         self._confirmed(confirm, "Creating a folder")
         await self._ensure_authorized(ctx)
-        return self._call(self.api.create_folder, {"folderName": name, "color": color})
+        return await self._call(self.api.create_folder, {"folderName": name, "color": color})
 
     async def move_meetings(
         self,
@@ -317,7 +364,7 @@ class LynseMCPTools:
         """Move one or more meetings to a Lynse folder."""
         self._confirmed(confirm, "Moving meetings")
         await self._ensure_authorized(ctx)
-        return self._call(
+        return await self._call(
             self.api.change_folder,
             {
                 "oldFolderId": old_folder_id,
@@ -335,13 +382,13 @@ class LynseMCPTools:
         """Permanently delete selected Lynse todos."""
         self._confirmed(confirm, "Deleting todos")
         await self._ensure_authorized(ctx)
-        return self._call(self.api.delete_todos, todo_ids)
+        return await self._call(self.api.delete_todos, todo_ids)
 
     async def clear_completed_todos(self, ctx: Context, confirm: bool) -> dict[str, Any]:
         """Permanently delete all completed Lynse todos."""
         self._confirmed(confirm, "Clearing completed todos")
         await self._ensure_authorized(ctx)
-        return self._call(self.api.clear_completed_todos)
+        return await self._call(self.api.clear_completed_todos)
 
 
 def create_server(
@@ -375,6 +422,10 @@ def create_server(
     server.tool(title="Get Lynse meeting audio file", annotations=READ_ONLY)(
         tools.get_meeting_audio
     )
+    for operation in TRANSCRIPTION_OPERATIONS.values():
+        server.tool(name=operation['mcp_tool'], title=operation['title'],
+                    annotations=WRITE if operation['write'] else READ_ONLY)(
+                        getattr(tools, operation['mcp_tool']))
     server.tool(title="List Lynse folders", annotations=READ_ONLY)(tools.list_folders)
     server.tool(title="List Lynse todos", annotations=READ_ONLY)(tools.list_todos)
     server.tool(title="Plan meeting organization", annotations=READ_ONLY)(
