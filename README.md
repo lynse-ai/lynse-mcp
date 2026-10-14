@@ -1,54 +1,115 @@
 # Lynse MCP
 
-`lynse-mcp` 是灵光记 Lynse 的独立 Model Context Protocol 服务仓库。
+灵光记的会议、音频、文件夹和待办工具，当前版本 `0.0.4`。保留远程账号授权与本地 stdio 两种方式；Lynse API 客户端复用 `lynse-cli`，不在此仓库复制。
 
-它把 Lynse 的会议、音频文件、文件夹和待办能力暴露给 Claude、Cursor、VS Code 等 MCP 客户端使用。
+## 远程接入
 
-## 版本
+国内正式入口已部署为 `https://www.lynse.cn/mcp`，连接 `api.lynse.cn` 正式账号系统；`https://www.lynse.ai/mcp` 连接 `gapp.lynse.cn` 测试账号系统。远程模式使用 Streamable HTTP + OAuth，用户在官网登录并授权，客户端无需安装 Python 或 Node。
 
-当前版本为 `0.0.4`。
+### Codex
 
-## 安装
+Codex 继续使用已经验证通过的 `www.lynse.ai` 入口；国内 `www.lynse.cn` 入口供 WorkBuddy 正式账号接入。
 
-需要 Python 3.11 或更高版本。
+合并到 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.lynse_test]
+url = "https://www.lynse.ai/mcp"
+```
+
+也可通过 CLI 配置并登录：
+
+```bash
+codex mcp add lynse_test --url https://www.lynse.ai/mcp
+codex mcp login lynse_test --scopes lynse:read --oauth-client-registration dcr
+```
+
+参考 [Codex MCP 文档](https://developers.openai.com/codex/mcp)。2026-10-10 已完成 `www.lynse.ai` 的 Codex 原生客户端只读接入实测；国内正式入口的协议检查通过，正式账号完整 OAuth 与查询尚未实测。调试步骤见 [Codex 实测记录](https://github.com/lynse-ai/lynse-mcp/blob/main/docs/CODEX_TEST.md)。
+
+### WorkBuddy
+
+在自定义 MCP 连接配置中使用：
+
+```json
+{
+  "mcpServers": {
+    "lynse": {
+      "type": "streamableHttp",
+      "url": "https://www.lynse.cn/mcp"
+    }
+  }
+}
+```
+
+由客户端完成 OAuth 登录。国内上传包使用 `python3 scripts/package_workbuddy.py --url https://www.lynse.cn/mcp --output dist/lynse-workbuddy-cn.zip` 生成，只包含元信息、远程 MCP 配置和图标，强制小于 20 MB。未指定 `--url` 的默认包仍接测试地址。见 [上传包说明](https://github.com/lynse-ai/lynse-mcp/blob/main/docs/WORKBUDDY_PACKAGE.md) 和 [WorkBuddy 官方文档](https://open.workbuddy.cn/docs/connector)。
+
+### Muse（muse.ai 网页应用）
+
+使用远程 HTTPS 服务。[Muse Connector Platform](https://muse.ai/platform) 公开提供连接器提交、审核和目录发布流程；公开页面未说明任意自定义 MCP URL 的具体配置格式。本仓库未完成 Muse 真实账号联调，不能将 Muse Code 的 `settings.json` 示例用于 muse.ai。提交与连接时需核对平台实际提供的 OAuth 回调和认证要求。
+
+## 本地接入
+
+需要 Python 3.11+。从仓库安装本地运行依赖：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-mcp.txt
 ```
 
-首次使用需要授权时，客户端会打开本机安全页面输入 Lynse Key。Key 不会进入聊天记录或 MCP 工具参数。
-
-## 运行
-
-stdio 模式：
+Windows 使用 `.venv\Scripts\python.exe`。依赖固定为 `lynse-cli` v1.7.0 和 MCP SDK 2.0.0；若 CLI tag 尚未发布，本地联调可用：
 
 ```bash
-.venv/bin/python lynse_mcp.py
+.venv/bin/python -m pip install -e ../lynse-cli "mcp==2.0.0"
 ```
 
-Streamable HTTP 模式：
+Codex 本地配置（替换绝对路径）：
 
-```bash
-.venv/bin/python lynse_mcp.py --transport streamable-http --host 127.0.0.1 --port 8000
+```toml
+[mcp_servers.lynse]
+command = "/绝对路径/lynse-mcp/.venv/bin/python"
+args = ["/绝对路径/lynse-mcp/lynse_mcp.py"]
+tool_timeout_sec = 360
 ```
 
-## 连接示例
+WorkBuddy 本地配置：
 
 ```json
 {
   "mcpServers": {
-    "lynse-mcp": {
-      "command": "/绝对路径/.venv/bin/python",
-      "args": ["/绝对路径/lynse_mcp.py"]
+    "lynse": {
+      "type": "stdio",
+      "command": "/绝对路径/lynse-mcp/.venv/bin/python",
+      "args": ["/绝对路径/lynse-mcp/lynse_mcp.py"]
     }
   }
 }
 ```
 
-## 说明
+stdio 由客户端启动，工作目录可以任意。首次调用通过安全本机页面输入 Lynse Key，客户端需支持 MCP URL elicitation；Key 不进入聊天或工具参数。已有 `~/.lynse/config.json` 授权也可复用。远程网页登录可避免客户端缺少 URL elicitation 的限制。
 
-- `get_meeting_audio` 通过 Lynse 预签名下载接口返回可访问的会议音频资源。
-- `reset_lynse_key` 在用户确认后打开安全页面；新 Key 验证成功才会替换旧 Key。
-- 所有写入和删除类工具都要求显式确认。
-- 这是一个独立仓库，不再包含 `lynse-cli` 的命令入口。
+npm 包只含本地运行文件。Node 启动器优先使用 `LYNSE_MCP_PYTHON` 指定的 Python，其次使用包内 `.venv`，再检查系统 Python；npm/npx 不会自动安装 Python 依赖。本地源码可运行 `node bin/lynse-mcp.js`（需 Node 18+）。
+
+Lynse Desktop 已加入 **设置 → AI 助手 → MCP 连接** 开关，重新构建桌面应用后可直接读取本地和已登录账号的云端数据，无需安装 Python 或 Node。开启后复制 Codex / WorkBuddy 配置即可；详见 [Lynse Desktop 本地 MCP](https://github.com/lynse-ai/lynse-mcp/blob/main/docs/DESKTOP_MCP.md)。本地地址仅供同机客户端使用；muse.ai 云端连接器使用远程地址。
+
+## 工具与授权
+
+- 授权：`get_auth_status`；本地另有 `authorize_lynse`、`reset_lynse_key`。
+- 读取：用户、会议列表/搜索/详情/总结/大纲/转写、文件夹和待办。
+- 音频：`get_meeting_audio` 返回预签名资源链接，过期后重新调用，不嵌入长音频。
+- 整理：先调用只读的 `plan_meeting_organization`，确认后再执行 `apply_meeting_organization`。
+- 写入：创建文件夹、移动会议、删除待办均需 `confirm=true`。
+
+远程默认 `lynse:read`，写入还需 `lynse:write`。本地替换 Key 仅在新 Key 验证成功后生效；环境凭据需在环境中更新后重启。
+
+## 开发与部署
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+依赖按用途分开：`requirements-mcp.txt` 用于本地，`requirements-remote.txt` 用于远程，`requirements-dev.txt` 用于测试。生产 Docker 镜像不带 Git 或网页测试客户端，测试部署显式选择 `test-ui` 构建阶段；测试和部署资料留在仓库，不进入 npm 包。
+
+多用户服务运行 `lynse_remote.py`，部署说明见 [官网账号授权与 ECS 部署](https://github.com/lynse-ai/lynse-mcp/blob/main/docs/ACCOUNT_OAUTH.md)。`lynse_mcp.py --transport streamable-http` 仅用于个人 loopback 调试，不作为公网多用户服务。
+
+`www.lynse.cn` 已通过阿里云 CLI/云助手部署到上海 ECS `47.101.165.66`，使用独立容器、账号授权数据库和静态页面目录，复用现有官网 HTTPS。部署与回退记录见 [国内部署记录](docs/deployment-www-lynse-cn.md)。

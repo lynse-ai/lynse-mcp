@@ -1,0 +1,25 @@
+services:
+  mcp:
+    image: ${LYNSE_MCP_IMAGE:?Set the immutable release image tag}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile-cn
+      target: production
+    init: true
+    restart: unless-stopped
+    env_file: /etc/lynse-mcp-cn/environment
+    environment:
+      FORWARDED_ALLOW_IPS: '*'
+    ports:
+      - '127.0.0.1:18001:8000'
+    volumes:
+      - oauth-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+volumes:
+  oauth-data:

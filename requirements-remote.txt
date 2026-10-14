@@ -1,0 +1,2 @@
+-r requirements-mcp.txt
+cryptography>=46.0.0,<51

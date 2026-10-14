@@ -29,17 +29,15 @@
     "url": "https://github.com/lynse-ai/lynse-mcp/issues"
   },
   "files": [
-    "lynse.py",
     "lynse_auth.py",
     "lynse_mcp.py",
     "bin/lynse-mcp.js",
     "requirements.txt",
     "requirements-mcp.txt",
-    "README.md",
-    "MCP.md",
-    "CHANGELOG.md"
+    "README.md"
   ],
   "engines": {
+    "node": ">=18",
     "python": ">=3.11"
   }
 }

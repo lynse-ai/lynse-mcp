@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lynse": {
+      "type": "streamableHttp",
+      "url": "https://www.lynse.ai/mcp",
+      "timeout": 30000
+    }
+  }
+}

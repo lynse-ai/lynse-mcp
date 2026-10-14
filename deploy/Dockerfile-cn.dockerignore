@@ -1,0 +1,11 @@
+*
+!requirements.txt
+!requirements-mcp.txt
+!requirements-remote.txt
+!lynse_mcp.py
+!lynse_auth.py
+!lynse_remote.py
+!lynse_account.py
+!lynse_oauth_store.py
+!vendor/
+!vendor/lynse_cli-1.7.0-py3-none-any.whl

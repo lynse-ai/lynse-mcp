@@ -3,7 +3,7 @@ import unittest
 
 from mcp import Client
 
-from lynse import LynseAPI
+from lynse import CLI_VERSION, LynseAPI
 from lynse_mcp import LynseMCPTools, create_server
 
 
@@ -78,6 +78,12 @@ class FakeContext:
 
 
 class LynseMCPToolTests(unittest.TestCase):
+    def test_uses_canonical_lynse_cli_1_7(self):
+        self.assertGreaterEqual(
+            tuple(int(part) for part in CLI_VERSION.split('.')),
+            (1, 7, 0),
+        )
+
     def test_read_tool_delegates_to_existing_api(self):
         api = FakeAPI()
         tools = LynseMCPTools(lambda: api, authorized)

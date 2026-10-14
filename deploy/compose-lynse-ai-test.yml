@@ -1,0 +1,24 @@
+services:
+  mcp:
+    image: lynse-mcp-ai-test:latest
+    build:
+      context: ..
+      target: test-ui
+    init: true
+    restart: unless-stopped
+    env_file: /etc/lynse-mcp-ai-test/environment
+    environment:
+      FORWARDED_ALLOW_IPS: '*'
+    ports:
+      - '127.0.0.1:18000:8000'
+    volumes:
+      - oauth-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+volumes:
+  oauth-data:

@@ -5,3 +5,7 @@ __pycache__/
 dist/
 node_modules/
 .DS_Store
+runtime-data/
+.env
+.env.*
+!.env.example

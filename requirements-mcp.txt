@@ -1,2 +1,2 @@
 -r requirements.txt
-mcp>=2.0.0,<3
+mcp==2.0.0

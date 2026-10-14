@@ -1,0 +1,22 @@
+services:
+  mcp:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Only the local Nginx proxy can reach the published port; it replaces X-Forwarded-For.
+      FORWARDED_ALLOW_IPS: '*'
+    ports:
+      - '127.0.0.1:8000:8000'
+    volumes:
+      - oauth-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+volumes:
+  oauth-data:

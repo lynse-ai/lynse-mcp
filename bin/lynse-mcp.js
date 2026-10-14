@@ -3,9 +3,15 @@
 const { spawnSync } = require("child_process");
 const path = require("path");
 
-const serverPy = path.resolve(__dirname, "..", "lynse_mcp.py");
+const root = path.resolve(__dirname, "..");
+const serverPy = path.join(root, "lynse_mcp.py");
 const userArgs = process.argv.slice(2);
-const candidates = process.platform === "win32"
+const localPython = process.platform === "win32"
+  ? path.join(root, ".venv", "Scripts", "python.exe")
+  : path.join(root, ".venv", "bin", "python");
+const candidates = process.env.LYNSE_MCP_PYTHON
+  ? [{ command: process.env.LYNSE_MCP_PYTHON, prefixArgs: [] }]
+  : [{ command: localPython, prefixArgs: [] }, ...(process.platform === "win32"
   ? [
       { command: "python", prefixArgs: [] },
       { command: "py", prefixArgs: ["-3"] },
@@ -14,7 +20,7 @@ const candidates = process.platform === "win32"
   : [
       { command: "python3", prefixArgs: [] },
       { command: "python", prefixArgs: [] },
-    ];
+    ])];
 
 for (const candidate of candidates) {
   const versionCheck = spawnSync(
@@ -22,7 +28,7 @@ for (const candidate of candidates) {
     [
       ...candidate.prefixArgs,
       "-c",
-      "import sys; from mcp.server import MCPServer; "
+      "import sys; from mcp.server import MCPServer; from lynse import LynseAPI; "
         + "sys.exit(0 if sys.version_info >= (3, 11) else 1)",
     ],
     { stdio: "ignore" },
@@ -51,7 +57,7 @@ for (const candidate of candidates) {
 }
 
 console.error(
-  "Error: Python 3.11+ with MCP SDK 2.x was not found. "
-    + "Install requirements-mcp.txt in the selected Python environment, then retry.",
+  "Error: Python 3.11+ with MCP SDK 2.x and lynse-cli was not found. "
+    + "Install requirements-mcp.txt, then set LYNSE_MCP_PYTHON to that Python executable.",
 );
 process.exit(1);

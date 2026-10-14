@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Limit the npm package to the local stdio runtime and consolidate client setup in README.md.
+- Separate remote dependencies and exclude Git and the optional OAuth test page from the production image.
+- Let the Node launcher use the repository virtual environment or an explicit `LYNSE_MCP_PYTHON`.
+- Add a three-file WorkBuddy OAuth connector ZIP with enforced limits below 20 MB.
+- Depend on `lynse-ai/lynse-cli` v1.7.0 as the single Lynse API client implementation.
+- Remove the copied `lynse.py`; this repository now contains only MCP transport, tools, and secure authorization adapters.
+
 ## 0.0.4 (2026-08-08)
 
 ### Changed

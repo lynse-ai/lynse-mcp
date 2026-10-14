@@ -1,0 +1,22 @@
+{
+  "name": "灵光记 Lynse",
+  "name_zh": "灵光记 Lynse",
+  "name_en": "Lynse",
+  "description": "查询灵光记云端会议、转写、总结、文件夹和待办，通过账号授权在 WorkBuddy 中使用会议知识。",
+  "description_zh": "查询灵光记云端会议、转写、总结、文件夹和待办，通过账号授权在 WorkBuddy 中使用会议知识。",
+  "description_en": "Search Lynse cloud meetings, transcripts, summaries, folders and todos with account authorization.",
+  "source": "lynse",
+  "type": "mcp",
+  "version": "0.0.4",
+  "minWorkbuddyVersion": "4.24.0",
+  "examples_zh": [
+    "找出上周产品评审会议的总结和待办",
+    "搜索讨论过定价方案的会议，并列出相关转写内容",
+    "先给出会议整理方案，等我确认后再整理文件夹"
+  ],
+  "examples_en": [
+    "Find the summary and action items from last week's product review.",
+    "Search meetings about pricing and show the relevant transcripts.",
+    "Propose a meeting organization plan and wait for my confirmation before applying it."
+  ]
+}
