@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (2026-11-01)
+
+### New Features
+
+- Add an MCP Apps interface built on the official `@modelcontextprotocol/ext-apps` SDK, with `show_meetings`, `show_todos`, and `show_confirmation` display tools backed by `ui://` HTML resources.
+- Serve the MCP Apps UI as a single self-contained HTML page that loads no external scripts, styles, or fonts.
+- Add a local preview server for iterating on MCP Apps cards outside a host client.
+- Add a vendor CLI that requires a pinned revision and checksum before replacing a vendored dependency.
 
 ### Changed
 
