@@ -28,7 +28,7 @@ from pydantic import Field
 from lynse import LynseAPI, LynseAPIError, TRANSCRIPTION_OPERATIONS
 from lynse_auth import LocalAuthFlow, auth_status
 
-MCP_VERSION = "0.0.4"
+MCP_VERSION = "0.1.1"
 
 
 Days = Annotated[int, Field(ge=1, le=3650, description="Number of recent days to query.")]

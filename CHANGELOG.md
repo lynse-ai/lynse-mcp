@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.1 (2026-11-01)
+
+### Fixed
+
+- Pre-fill the local authorize page with the deployed gateway (`https://gapp.lynse.cn`), overridable via `LYNSE_API_HOST`; the previous `https://api.lynse.cn` default rejected valid keys with `error.api.key.invalid`.
+- Make `LocalAuthFlow.stop()` safe when called before `start()`; it previously blocked forever waiting for the server shutdown event.
+- Align the server's advertised `MCP_VERSION` with the package version (it still said 0.0.4 in 0.1.0).
+
+### Added
+
+- Ship the ZCode plugin source (`plugins/lynse-mcp/`): remote MCP server declaration for `https://www.lynse.cn/mcp`, a bundled `lynse` usage skill, and bilingual READMEs documenting the scope-gated tool set and side effects.
+- Four tests covering the gateway default, its environment override, the rendered authorize form, and the `stop()`-without-`start()` safety.
+
 ## 0.1.0 (2026-11-01)
 
 ### New Features
