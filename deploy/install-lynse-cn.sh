@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 release="$(cd "$(dirname "$0")/.." && pwd)"
+previous_release="$(readlink -f /opt/lynse-mcp-cn/current || true)"
+# A server-only update must retain the deployed website authorization bundle.
+if [ ! -s "$release/web/mcp-auth.html" ]; then
+    if [ ! -s "$previous_release/web/mcp-auth.html" ]; then
+        printf '%s\n' 'No existing authorization page to preserve; prepare the website bundle first.' >&2
+        exit 1
+    fi
+    mkdir -p "$release/web"
+    cp -a -n "$previous_release/web/." "$release/web/"
+fi
 export LYNSE_MCP_IMAGE="lynse-mcp-cn:$(basename "$release")"
 compose=(docker compose --project-name lynse-mcp-cn -f "$release/deploy/compose-lynse-cn.yml")
 install -d -m 700 /etc/lynse-mcp-cn
@@ -34,7 +44,6 @@ docker run --rm --read-only --tmpfs /tmp:rw,size=32m --cap-drop ALL \
     -v "$release:/workspace:ro" -w /workspace \
     --entrypoint /opt/venv/bin/python "$LYNSE_MCP_IMAGE" \
     -m unittest discover -s tests -q
-previous_release="$(readlink -f /opt/lynse-mcp-cn/current || true)"
 rollback_service() {
     status=$?
     trap - ERR

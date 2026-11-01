@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -11,7 +12,17 @@ def cli(action, region, args):
     result = subprocess.run(['aliyun', 'ecs', action, '--region', region,
                              '--RegionId', region, *args], capture_output=True, text=True)
     if result.returncode:
-        raise SystemExit(result.stderr.strip() or result.stdout.strip())
+        # OAuth failures can echo a refresh token in the provider's message.
+        # Do not copy untrusted CLI diagnostics into chat or deployment logs.
+        try:
+            error = json.loads(result.stderr.strip() or result.stdout.strip())
+            code = error.get('error_code', '') if isinstance(error, dict) else ''
+        except ValueError:
+            code = ''
+        label = code if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', code) else 'unknown'
+        hint = (' Reauthenticate with: aliyun configure --mode OAuth --oauth-site-type CN'
+                if label == 'invalid_grant' else ' Check the configured Aliyun CLI account.')
+        raise SystemExit(f'Aliyun {action} failed ({label}).{hint}')
     return json.loads(result.stdout)
 
 

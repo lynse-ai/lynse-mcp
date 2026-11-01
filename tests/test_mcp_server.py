@@ -1,5 +1,9 @@
 import asyncio
 import unittest
+from copy import deepcopy
+from unittest.mock import Mock, patch
+
+import requests
 
 from mcp import Client
 
@@ -26,6 +30,10 @@ class FakeAPI:
     def delete_todos(self, todo_ids):
         self.calls.append(("delete", todo_ids))
         return {"code": 200, "data": todo_ids}
+
+    def change_folder(self, payload):
+        self.calls.append(("move", payload))
+        return {"code": 200, "data": True}
 
     def get_audio_file(self, file_id):
         self.calls.append(("audio", file_id))
@@ -78,6 +86,106 @@ class FakeContext:
 
 
 class LynseMCPToolTests(unittest.TestCase):
+    def test_audio_reports_missing_oss_object_without_exposing_signed_link(self):
+        self._check_oss_result(404, "missing from cloud storage")
+
+    def test_audio_reports_unavailable_oss_download(self):
+        self._check_oss_result(403, "download is unavailable")
+
+    def test_audio_checks_oss_with_one_byte_stream_and_no_account_credentials(self):
+        self._check_oss_result(206)
+
+    def test_audio_probe_hides_network_exception_details(self):
+        self._check_oss_result(requests.ConnectionError("private-download-signature"), "Unable to check")
+
+    def _check_oss_result(self, status, error=None):
+        api = FakeAPI()
+        result = api.get_audio_file("meeting-1")
+        result["data"]["url"] = "https://recordings.oss-cn-shenzhen.aliyuncs.com/audio.m4a?private-download-signature"
+        api.get_audio_file = lambda _: result
+        session = Mock()
+        session.__enter__ = Mock(return_value=session)
+        session.__exit__ = Mock(return_value=False)
+        if isinstance(status, Exception):
+            session.get.side_effect = status
+        else:
+            response = Mock(status_code=status)
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            session.get.return_value = response
+
+        async def run():
+            async with Client(create_server(lambda: api, authorized)) as client:
+                return await client.call_tool("get_meeting_audio", {"file_id": "meeting-1"})
+
+        with patch("lynse_mcp.requests.Session", return_value=session):
+            protocol_result = asyncio.run(run())
+        self.assertFalse(session.trust_env)
+        session.get.assert_called_once_with(result["data"]["url"], headers={"Range": "bytes=0-0"},
+                                            stream=True, allow_redirects=False, timeout=(3, 10))
+        if error:
+            self.assertTrue(protocol_result.is_error)
+            self.assertIn(error, str(protocol_result))
+            self.assertNotIn("private-download-signature", str(protocol_result))
+            self.assertTrue(all(c.type != "resource_link" for c in protocol_result.content))
+        else:
+            self.assertFalse(protocol_result.is_error)
+            self.assertEqual(protocol_result.content[0].type, "resource_link")
+
+    def test_profile_filters_credentials_from_all_protocol_result_formats(self):
+        upstream = {
+            "code": 200, "msg": "SUCCESS", "token": "envelope-private-token",
+            "data": {
+                "id": "account-1", "nickname": "Test account", "phone": "13900000001",
+                "password": "private-password-hash", "apiKey": "private-api-key",
+                "accessToken": "private-access-token", "wxOpenid": "private-openid",
+                "futureSecret": "private-future-secret",
+                "avatarUrl": {"password": "private-nested-secret"},
+            },
+        }
+        original = deepcopy(upstream)
+        api = FakeAPI()
+        api.get_current_customer = lambda: upstream
+
+        async def run():
+            async with Client(create_server(lambda: api, authorized)) as client:
+                return await client.call_tool("get_current_user", {})
+
+        result = asyncio.run(run())
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content, {
+            "code": 200, "msg": "SUCCESS",
+            "data": {"id": "account-1", "nickname": "Test account", "phone": "13900000001"},
+        })
+        self.assertNotIn("private-", str(result))
+        self.assertEqual(upstream, original)
+
+    def test_protocol_moves_to_a_folder_and_back_to_unfiled(self):
+        api = FakeAPI()
+
+        async def run():
+            async with Client(create_server(lambda: api, authorized)) as client:
+                moved = await client.call_tool("move_meetings", {
+                    "file_ids": ["meeting-1"], "new_folder_id": "folder-1", "confirm": True,
+                })
+                restored = await client.call_tool("move_meetings", {
+                    "file_ids": ["meeting-1"], "old_folder_id": "folder-1",
+                    "new_folder_id": "", "confirm": True,
+                })
+                denied = await client.call_tool("move_meetings", {
+                    "file_ids": ["meeting-1"], "new_folder_id": "", "confirm": False,
+                })
+                return moved, restored, denied
+
+        moved, restored, denied = asyncio.run(run())
+        self.assertFalse(moved.is_error)
+        self.assertFalse(restored.is_error)
+        self.assertTrue(denied.is_error)
+        self.assertEqual(api.calls, [
+            ("move", {"oldFolderId": "", "newFolderId": "folder-1", "fileIds": ["meeting-1"]}),
+            ("move", {"oldFolderId": "folder-1", "newFolderId": "", "fileIds": ["meeting-1"]}),
+        ])
+
     def test_uses_canonical_lynse_cli_1_7(self):
         self.assertGreaterEqual(
             tuple(int(part) for part in CLI_VERSION.split('.')),

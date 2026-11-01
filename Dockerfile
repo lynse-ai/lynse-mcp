@@ -14,6 +14,8 @@ COPY --from=dependencies /opt/venv /opt/venv
 RUN useradd --uid 10001 --create-home mcp \
     && mkdir /data && chown mcp:mcp /data
 COPY lynse_mcp.py lynse_auth.py lynse_remote.py lynse_account.py lynse_oauth_store.py ./
+COPY lynse_ui.py ./
+COPY web/dist/lynse-app.html ./web/dist/lynse-app.html
 USER mcp
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"

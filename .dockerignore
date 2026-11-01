@@ -9,3 +9,9 @@
 !lynse_account.py
 !lynse_oauth_store.py
 !lynse_test_client.py
+!lynse_ui.py
+!web/
+web/*
+!web/dist/
+web/dist/*
+!web/dist/lynse-app.html

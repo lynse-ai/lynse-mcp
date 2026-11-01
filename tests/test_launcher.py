@@ -46,7 +46,8 @@ class LauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="lynse mcp ") as directory:
             package = Path(directory)
             (package / "bin").mkdir()
-            for name in ("lynse_mcp.py", "lynse_auth.py", "bin/lynse-mcp.js"):
+            for name in ("lynse_mcp.py", "lynse_auth.py", "lynse_ui.py", "web/dist/lynse-app.html", "bin/lynse-mcp.js"):
+                (package / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, package / name)
             params = StdioServerParameters(
                 command=NODE,
@@ -66,14 +67,17 @@ class LauncherTests(unittest.TestCase):
                         await session.initialize()
                         tools = await session.list_tools()
                         result = await session.call_tool("get_auth_status", {})
-                        return tools, result
+                        resource = await session.read_resource("ui://lynse/meetings-v1.html")
+                        return tools, result, resource
 
-            tools, result = asyncio.run(run())
+            tools, result, resource = asyncio.run(run())
         self.assertIn("get_meeting_audio", {tool.name for tool in tools.tools})
         self.assertIn("reset_lynse_key", {tool.name for tool in tools.tools})
         self.assertFalse(result.is_error)
         self.assertTrue(result.structured_content["configured"])
         self.assertNotIn("launcher-test-only", result.model_dump_json())
+        self.assertEqual(resource.contents[0].mime_type, "text/html;profile=mcp-app")
+        self.assertIn("<!doctype html>", resource.contents[0].text)
 
 
 if __name__ == "__main__":

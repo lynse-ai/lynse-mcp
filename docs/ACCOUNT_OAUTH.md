@@ -46,7 +46,7 @@ curl --fail http://127.0.0.1:8000/health
 
 国内 ECS 直接复用 `www.lynse.cn` 的现有 DNS 和 HTTPS 证书，将 `deploy/nginx-lynse-cn.conf` 加入现有官网 HTTPS server；服务仅绑定 `127.0.0.1:18001`，静态授权页放在独立 release 目录。国内原配置对点路径使用 `deny all`，OAuth 元数据需使用专门的精确 location。`deploy/nginx-mcp.conf` 仅保留为另设 `mcp.lynse.cn` 子域名时的参考，需要另外配置 DNS 和证书。若官网和后端不在同一机器，官网代理到 MCP 的私网地址并限制访问来源。
 
-国内正式环境已通过阿里云 CLI/云助手部署到 ECS `47.101.165.66`；测试环境通过腾讯云 CLI/TAT 部署到官网现有 Lighthouse 实例。两边均新增授权页与 MCP 路由，复用原有 HTTPS 证书，没有修改 DNS 或微信平台。授权页使用 RevelSpark 的独立 `vite.mcp.config.ts` 构建，不替换首页及其他官网资源。国内镜像从本地构建的官方 CLI v1.7.0 wheel 安装，依赖使用阿里云 PyPI 镜像，构建过程无需 Git/apt。操作与回退方法见 [国内部署记录](deployment-www-lynse-cn.md) 和 [测试部署记录](deployment-www-lynse-ai-test.md)。
+国内正式环境已通过阿里云 CLI/云助手部署到 ECS `47.101.165.66`；测试环境通过腾讯云 CLI/TAT 部署到官网现有 Lighthouse 实例。两边均新增授权页与 MCP 路由，复用原有 HTTPS 证书，没有修改 DNS 或微信平台。授权页使用 RevelSpark 的独立 `vite.mcp.config.ts` 构建，不替换首页及其他官网资源。国内镜像于 2026-10-31 更新为固定提交构建的 CLI 1.8.5 wheel，并校验来源提交和 SHA256；依赖使用阿里云 PyPI 镜像，构建过程无需 Git/apt。操作与回退方法见 [国内最新更新](deployment-www-lynse-cn-2026-10-31.md)、[首次国内部署](deployment-www-lynse-cn.md) 和 [测试部署记录](deployment-www-lynse-ai-test.md)。
 
 ## 本地验证
 
@@ -77,12 +77,24 @@ set +a
 - 默认 `lynse:read`；申请 `lynse:write` 才能操作文件夹、移动会议或删除待办，同时工具仍要求 `confirm=true`。
 - 授权码 120 秒且单次兑换，浏览器请求绑定 Cookie 和 CSRF；授权请求 10 分钟有效。
 - Access Token 最长 15 分钟，Refresh Token 每次旋转；撤销任一 Token 会撤销同一授权下的所有 Token。
-- 当前未接入业务账号的长期刷新机制：授权有效期以账号登录 Token 为上限，最长 24 小时，到期需重新登录。浏览器登录态最长 1 小时。
-- SDK 的 MCP 会话绑定创建它的访问 Token；访问 Token 刷新后，客户端应重新初始化 MCP 会话。
+- 当前未接入业务账号的长期刷新机制：账号登录有效期取后端 `expireIn` 与本地 24 小时上限中的较短值；缺少 `expireIn` 时按 24 小时处理。grant 和 MCP Refresh Token 共用该截止时间，刷新 MCP Token 不延长它，到期需重新登录。浏览器登录态最长 1 小时。
+- 当前 SDK 的 MCP 会话绑定客户端 ID、签发者和账号主体；同一身份刷新 Access Token 后可继续使用原会话，刷新本身不要求重新初始化。服务重启或会话失效返回 404 时，客户端仍需重新初始化；更换账号不能复用原会话。
 - SQLite 加密存储适用于这版单 ECS、单实例部署。横向扩容前需迁移共享数据库和限流，不能复制独立 SQLite 文件作为多个实例的状态。
 - OAuth 地址含临时票据，Nginx 参考配置关闭相关访问日志；云代理/CDN 也应跳过这些路径的缓存及完整 URL 日志。不要记录短信验证码、账号 Token、MCP Token 或授权码。
 
 上线验证应包含真实测试账号登录、客户端完整 OAuth/MCP 调用、撤销授权及生产/测试隔离。自动测试已覆盖协议与多账号隔离，但不能代替真实账号和客户端联调。
+
+## 长期连接与第三方客户端联调
+
+MCP Refresh Token 用于续发最长 15 分钟的 MCP Access Token；业务账号 Token 用于调用 Lynse 业务接口。这是两层独立凭据。目前手机/微信登录适配仅保存业务账号 Token，没有接入该账号的续期凭据或续期接口。CLI 的 `/api/auth/apikey/token` 需要 API Key，WorkBuddy 的 `/api/auth/workbuddy/token/refresh` 刷新的是 WorkBuddy 票据，均不能直接用于续期这里的手机/微信账号登录态。
+
+要让连接跨越业务账号 Token 的有效期，需账号后端提供可供此登录流程使用的续期凭据或等价接口，再由 MCP 接入。若后端已有该能力，只需修改 MCP 适配；否则需后端配合。单独延长 grant、MCP Refresh Token 或取消本地 24 小时上限，都不能使已过期的业务账号 Token 恢复有效。
+
+后端评审与交付可使用 [MCP 长期账号授权实施计划](BACKEND_MCP_REFRESH_PLAN.md)，其中接口、有效期和发布步骤均为待评审方案，尚未实施。
+
+`resource` 是必填参数，授权请求、授权码兑换和刷新请求均须使用发现文档中的 MCP 资源地址。正式环境为 `https://www.lynse.cn/mcp`，测试环境为 `https://www.lynse.ai/mcp`，不能混用。缺失、空值或错误值返回 `invalid_target`，并在 `error_description` 中给出本实例要求的地址；Token 请求还会拒绝重复的 `resource`。保持资源绑定校验，第三方漏传参数应先作为客户端兼容性问题定位。
+
+Muse 等客户端的验收应覆盖完整授权、`tools/list`、只读 `tools/call`、跨 15 分钟的 Token 刷新与会话连续调用、授权到期后的重新连接，以及撤销授权。元数据、DCR 或回调登记通过不代表完整接入成功。授权页面打不开时，先确认失败发生在哪个站点、哪个跳转环节及对应 HTTP 状态，再判断归属；不要记录包含票据、授权码或 Token 的完整 URL。
 
 ## 验证记录（2026-10-09）
 
@@ -94,4 +106,4 @@ set +a
 
 `www.lynse.cn/mcp` 的容器健康、Nginx 检查、OAuth 发现、未授权请求 401、动态注册、PKCE 授权跳转、浏览器 context 和拒绝回调均通过。服务器 Python 3.12 容器内 26 项协议测试通过；官网首页文件校验值未变。生产镜像未包含网页测试客户端，`/platform/oauth/test` 返回 404。新设计的授权确认页面已经部署，默认不显示微信登录。
 
-用户确认国内连接正式账号源 `api.lynse.cn`，Codex 继续使用已验证的 `lynse_test` → `www.lynse.ai/mcp`；额外添加的 `lynse_cn` 已移除。国内正式账号完整 OAuth、会议查询与 WorkBuddy 真实安装尚未实测；已完成的 Codex 真实账号查询属于 `www.lynse.ai` 测试环境。
+2026-10-31 已重新添加并验证 `lynse_cn` → `www.lynse.cn/mcp`，通过国内正式账号网页 OAuth、会议正文、待办和音频读取。该连接的现有只读授权在服务升级后仍然有效。WorkBuddy 真实安装与各宿主内嵌界面仍需分别联调。`lynse_test` 及测试环境未在本次更新。

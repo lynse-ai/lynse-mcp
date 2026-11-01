@@ -116,7 +116,8 @@ class AccountOAuthProvider:
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams):
         if params.resource != self.settings.resource:
-            raise AuthorizeError("invalid_target", "resource must identify this MCP server")
+            raise AuthorizeError("invalid_target",
+                                 f"resource is required and must equal {self.settings.resource}")
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}", params.code_challenge):
             raise AuthorizeError("invalid_request", "S256 PKCE challenge is required")
         scopes = params.scopes or [READ]
@@ -391,7 +392,8 @@ class OAuthSecurityMiddleware(BaseHTTPMiddleware):
             if path == "/token" and request.method == "POST":
                 form = parse_qs(body.decode("utf-8", errors="replace"))
                 if form.get("resource") != [self.provider.settings.resource]:
-                    return JSONResponse({"error": "invalid_target"}, status_code=400)
+                    return JSONResponse({"error": "invalid_target", "error_description":
+                        f"resource is required and must equal {self.provider.settings.resource}"}, status_code=400)
         response = await call_next(request)
         if path == "/authorize" and "location" in response.headers:
             destination = urlsplit(response.headers["location"])

@@ -3,6 +3,11 @@ __pycache__/
 .pytest_cache/
 .venv/
 dist/
+!web/dist/
+web/dist/*
+!web/dist/lynse-app.html
+web/test-results/
+web/playwright-report/
 node_modules/
 .DS_Store
 runtime-data/

@@ -7,5 +7,15 @@
 !lynse_remote.py
 !lynse_account.py
 !lynse_oauth_store.py
+!lynse_ui.py
+!web/
+web/*
+!web/dist/
+web/dist/*
+!web/dist/lynse-app.html
 !vendor/
-!vendor/lynse_cli-1.7.0-py3-none-any.whl
+!vendor/lynse_cli-*.whl
+!vendor/lynse-cli-source.json
+!scripts/
+scripts/*
+!scripts/vendor_cli.py

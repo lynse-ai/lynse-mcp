@@ -24,7 +24,7 @@ codex mcp add lynse_test --url https://www.lynse.ai/mcp
 codex mcp login lynse_test --scopes lynse:read --oauth-client-registration dcr
 ```
 
-参考 [Codex MCP 文档](https://developers.openai.com/codex/mcp)。2026-10-10 已完成 `www.lynse.ai` 的 Codex 原生客户端只读接入实测；国内正式入口的协议检查通过，正式账号完整 OAuth 与查询尚未实测。调试步骤见 [Codex 实测记录](https://github.com/lynse-ai/lynse-mcp/blob/main/docs/CODEX_TEST.md)。
+参考 [Codex MCP 文档](https://developers.openai.com/codex/mcp)。2026-10-10 已完成 `www.lynse.ai` 的 Codex 原生客户端只读接入实测；2026-10-31 已完成国内正式入口的真实账号 OAuth、会议正文、待办及音频查询，并部署 23 个工具和 3 个 UI 资源，见 [正式环境更新记录](docs/deployment-www-lynse-cn-2026-10-31.md)。调试步骤见 [Codex 实测记录](https://github.com/lynse-ai/lynse-mcp/blob/main/docs/CODEX_TEST.md)。
 
 ### WorkBuddy
 
@@ -100,6 +100,22 @@ Lynse Desktop 已加入 **设置 → AI 助手 → MCP 连接** 开关，重新�
 - 写入：创建文件夹、移动会议、删除待办均需 `confirm=true`。
 
 远程默认 `lynse:read`，写入还需 `lynse:write`。本地替换 Key 仅在新 Key 验证成功后生效；环境凭据需在环境中更新后重启。
+
+## MCP Apps 界面
+
+支持 MCP Apps 的客户端可以调用三个展示工具：
+
+| 工具 | 界面 |
+| --- | --- |
+| `show_meetings` | 会议列表、标题搜索、分页、摘要 / 大纲 / 转写详情，以及录音播放、倍速和链接刷新；传入 `file_id` 可直接打开一场会议 |
+| `show_todos` | 待办列表、全部 / 待完成 / 已完成筛选、截止日期、分页与来源会议 |
+| `show_confirmation` | A/B/C 等单选选项；先选择，再确认，支持取消并回传到对话 |
+
+界面跟随宿主传入的明暗主题与颜色变量，缺少强调色时使用青绿色。普通 MCP 客户端继续收到文本和结构化结果。待办界面只读；展示选择框只返回 `awaiting_user`，用户点击确认后才通过 `ui/message` 发送选择，不会直接执行写入。
+
+国内正式入口 `www.lynse.cn/mcp` 已于 2026-10-31 部署这些工具；原生 MCP 协议已验证 UI 资源和真实会议正文读取。客户端重新连接后可刷新工具清单；实际界面渲染取决于客户端的 MCP Apps 支持，宿主内播放仍需在对应客户端联调。本次未更新 `www.lynse.ai` 测试服务。
+
+本地构建与交互预览见 [MCP Apps 接入说明](docs/MCP_APPS.md)。
 
 ## 开发与部署
 

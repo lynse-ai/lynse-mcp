@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from typing import Annotated, Any, Callable, Literal
+from urllib.parse import urlsplit
+
+import requests
 
 try:
     from mcp.server import MCPServer
@@ -31,6 +35,40 @@ Days = Annotated[int, Field(ge=1, le=3650, description="Number of recent days to
 Page = Annotated[int, Field(ge=1, description="One-based page number.")]
 PageSize = Annotated[int, Field(ge=1, le=100, description="Maximum results per page.")]
 Identifier = Annotated[str, Field(min_length=1, description="Lynse object ID.")]
+FolderDestination = Annotated[
+    str, Field(description="Destination folder ID; use an empty string to return meetings to unfiled.")
+]
+
+# The upstream customer record also contains credentials and internal account
+# identifiers. Only these profile fields belong in an MCP tool result.
+PROFILE_FIELDS = frozenset({
+    "id", "username", "nickname", "email", "phone", "avatarUrl", "language",
+    "registrationTime", "isActive", "pointsAmount", "usedPointsAmount",
+    "benefitType", "teamId",
+})
+
+
+def _check_oss_audio(url: str) -> None:
+    """Detect missing OSS objects without downloading the recording or sending account credentials."""
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or parsed.username or parsed.password
+            or parsed.port not in (None, 443)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*\.oss[-a-z0-9]*\.aliyuncs\.com", parsed.hostname or "")):
+        return
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            with session.get(url, headers={"Range": "bytes=0-0"}, stream=True,
+                             allow_redirects=False, timeout=(3, 10)) as response:
+                if response.status_code in (404, 410):
+                    raise ValueError(
+                        "The recording is missing from cloud storage. Restore or re-upload "
+                        "the original audio; refreshing the download link will not recover it."
+                    )
+                if response.status_code not in (200, 206):
+                    raise ValueError("The recording download is unavailable; request a fresh link or try again later.")
+    except requests.RequestException:
+        raise ValueError("Unable to check the recording download; please try again later.") from None
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 WRITE = ToolAnnotations(
@@ -181,7 +219,16 @@ class LynseMCPTools:
     async def get_current_user(self, ctx: Context) -> dict[str, Any]:
         """Get the current Lynse account profile."""
         await self._ensure_authorized(ctx)
-        return await self._call(self.api.get_current_customer)
+        result = await self._call(self.api.get_current_customer)
+        profile = result.get("data")
+        public_profile = {
+            key: value for key, value in profile.items()
+            if key in PROFILE_FIELDS and isinstance(value, (str, int, float, bool, type(None)))
+        } if isinstance(profile, dict) else None
+        return {
+            **{key: result[key] for key in ("code", "msg", "message") if key in result},
+            "data": public_profile,
+        }
 
     async def list_meetings(self, ctx: Context, days: Days = 7) -> dict[str, Any]:
         """List meetings recorded during the last N days."""
@@ -226,6 +273,7 @@ class LynseMCPTools:
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, dict) or not data.get("url"):
             raise ValueError("Lynse did not return an audio file URL for this meeting.")
+        await asyncio.to_thread(_check_oss_audio, str(data["url"]))
 
         raw_size = data.get("size")
         size = raw_size if isinstance(raw_size, int) and raw_size >= 0 else None
@@ -357,11 +405,11 @@ class LynseMCPTools:
         self,
         ctx: Context,
         file_ids: Annotated[list[str], Field(min_length=1)],
-        new_folder_id: Identifier,
+        new_folder_id: FolderDestination,
         confirm: bool,
         old_folder_id: str = "",
     ) -> dict[str, Any]:
-        """Move one or more meetings to a Lynse folder."""
+        """Move meetings to a folder, or use an empty destination to return them to unfiled."""
         self._confirmed(confirm, "Moving meetings")
         await self._ensure_authorized(ctx)
         return await self._call(
@@ -450,6 +498,8 @@ def create_server(
     server.tool(title="Clear completed Lynse todos", annotations=DESTRUCTIVE)(
         tools.clear_completed_todos
     )
+    from lynse_ui import register_apps
+    register_apps(server, tools)
     return server
 
 

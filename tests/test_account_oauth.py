@@ -5,6 +5,7 @@ import hashlib
 import logging
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -15,6 +16,7 @@ from starlette.testclient import TestClient
 from lynse_account import AccountBackend, AccountLynseAPI
 from lynse import LynseAPIError
 from lynse_remote import API_PATH, Settings, create_app
+from lynse_oauth_store import fingerprint
 
 RESOURCE = 'https://mcp.lynse.cn/mcp'
 WEB = 'https://www.lynse.cn'
@@ -136,6 +138,25 @@ class AccountOAuthTests(unittest.TestCase):
         self.assertIn('/.well-known/oauth-protected-resource/mcp', r.headers['www-authenticate'])
         self.assertEqual(self.rpc('a-lynse-login-token', 'tools/list').status_code, 401)
 
+    def test_remote_profile_filters_secrets_and_write_grant_can_return_meetings_to_unfiled(self):
+        flow = self.grant(scopes='lynse:read lynse:write')
+        token = self.exchange(flow).json()['access_token']
+        session = self.initialize(token)
+        profile = {'code': 200, 'data': {'id': 'verified-account', 'nickname': 'Test account',
+                   'password': 'private-password-hash', 'apiKey': 'private-api-key'}}
+        with patch.object(AccountLynseAPI, 'get_current_customer', return_value=profile):
+            response = self.rpc(token, 'tools/call', {'name': 'get_current_user', 'arguments': {}}, session)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('private-', response.text)
+        result = response.json()['result']
+        self.assertFalse(result.get('isError', False))
+        self.assertEqual(result['structuredContent']['data'], {'id': 'verified-account', 'nickname': 'Test account'})
+        with patch.object(AccountLynseAPI, 'change_folder', return_value={'code': 200}) as move:
+            response = self.rpc(token, 'tools/call', {'name': 'move_meetings', 'arguments': {
+                'file_ids': ['meeting-1'], 'new_folder_id': '', 'old_folder_id': 'folder-1', 'confirm': True}}, session)
+        self.assertFalse(response.json()['result'].get('isError', False))
+        move.assert_called_once_with({'oldFolderId': 'folder-1', 'newFolderId': '', 'fileIds': ['meeting-1']})
+
     def test_pkce_resource_redirect_and_code_replay(self):
         flow = self.grant()
         self.assertEqual(self.exchange(flow, code_verifier='b' * 64).json()['error'], 'invalid_grant')
@@ -161,6 +182,94 @@ class AccountOAuthTests(unittest.TestCase):
         r = self.action(flow, 'consent', decision='deny')
         self.assertEqual(parse_qs(urlsplit(r.json()['redirect_uri']).query)['error'], ['access_denied'])
         self.assertEqual(self.action(flow, 'consent', decision='deny').status_code, 400)
+
+    def test_resource_errors_explain_expected_target_without_consuming_tokens(self):
+        client = self.register()
+        params = {'response_type': 'code', 'client_id': client['client_id'],
+                  'redirect_uri': client['redirect_uris'][0], 'code_challenge': 'a' * 43,
+                  'code_challenge_method': 'S256', 'scope': 'lynse:read', 'state': 'keep'}
+        description = f'resource is required and must equal {RESOURCE}'
+        for resource in (None, '', 'https://other.test/mcp'):
+            with self.subTest(endpoint='authorize', resource=resource):
+                request = params if resource is None else params | {'resource': resource}
+                response = self.client.get('/authorize', params=request, follow_redirects=False)
+                self.assertEqual(response.status_code, 302, response.text)
+                query = parse_qs(urlsplit(response.headers['location']).query)
+                self.assertEqual(query['error'], ['invalid_target'])
+                self.assertEqual(query['error_description'], [description])
+                self.assertEqual(query['state'], ['keep'])
+                self.assertEqual(query['iss'], [self.app.state.oauth_provider.issuer])
+
+        flow = self.grant(client=client)
+        code_form = {'client_id': client['client_id'], 'grant_type': 'authorization_code',
+                     'code': flow['code'], 'code_verifier': flow['verifier'], 'redirect_uri': flow['redirect']}
+        for grant_type in ('authorization_code', 'refresh_token'):
+            for resource in (None, '', 'https://other.test/mcp', [RESOURCE, RESOURCE]):
+                with self.subTest(grant_type=grant_type, resource=resource):
+                    request = code_form if resource is None else code_form | {'resource': resource}
+                    response = self.client.post('/token', data=request)
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json(), {'error': 'invalid_target', 'error_description': description})
+            response = self.client.post('/token', data=code_form | {'resource': RESOURCE})
+            self.assertEqual(response.status_code, 200, response.text)
+            code_form = {'client_id': client['client_id'], 'grant_type': 'refresh_token',
+                         'refresh_token': response.json()['refresh_token']}
+
+    def test_refresh_after_access_expiry_preserves_same_account_session(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        session = self.initialize(tokens['access_token'])
+        with patch('time.time', return_value=time.time() + 901):
+            self.assertEqual(self.rpc(tokens['access_token'], 'tools/list', session=session).status_code, 401)
+            refreshed = self.client.post('/token', data={
+                'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
+                'refresh_token': tokens['refresh_token'], 'resource': RESOURCE})
+            self.assertEqual(refreshed.status_code, 200, refreshed.text)
+            access = refreshed.json()['access_token']
+            self.assertEqual(self.rpc(access, 'tools/list', session=session).status_code, 200)
+            owners = []
+            def files(api, days):
+                owners.append(api.owner_id)
+                return {'code': 200, 'data': [{'id': 'meeting-after-refresh'}]}
+            with patch.object(AccountLynseAPI, 'list_files_by_time_range', files):
+                result = self.rpc(access, 'tools/call',
+                    {'name': 'list_meetings', 'arguments': {'days': 3}}, session)
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertFalse(result.json()['result'].get('isError', False))
+            self.assertIn('meeting-after-refresh', result.text)
+            self.assertEqual(owners, ['13900000001'])
+
+    def test_refresh_never_extends_upstream_grant_expiry(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        provider = self.app.state.oauth_provider
+        access = asyncio.run(provider.verify_token(tokens['access_token']))
+        grant_id = access.claims['grant_id']
+        expires = provider.store.get('grant', grant_id)['expires']
+        self.assertEqual(provider.store.get('refresh', fingerprint(tokens['refresh_token']))['expires_at'], int(expires))
+        with patch('time.time', return_value=expires - 30):
+            refreshed = self.client.post('/token', data={
+                'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
+                'refresh_token': tokens['refresh_token'], 'resource': RESOURCE})
+            self.assertEqual(refreshed.status_code, 200, refreshed.text)
+            tokens = refreshed.json()
+            self.assertEqual(tokens['expires_in'], 30)
+            self.assertEqual(provider.store.get('grant', grant_id)['expires'], expires)
+            self.assertEqual(provider.store.get('refresh', fingerprint(tokens['refresh_token']))['expires_at'], int(expires))
+        with patch('time.time', return_value=expires + 1):
+            response = self.client.post('/token', data={
+                'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
+                'refresh_token': tokens['refresh_token'], 'resource': RESOURCE})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(response.json()['error'], 'invalid_grant')
+            self.assertEqual(self.rpc(tokens['access_token'], 'tools/list').status_code, 401)
+
+    def test_account_login_lifetime_respects_upstream_and_local_cap(self):
+        backend = AccountBackend('https://api.lynse.cn')
+        for upstream, expected in ((3600, 3600), (30 * 86400, 86400)):
+            with self.subTest(expireIn=upstream), patch.object(backend, 'request', side_effect=[
+                    {'token': 'fake-login', 'expireIn': upstream}, {'id': 'verified'}]):
+                self.assertEqual(backend.phone_login('13900000001', '123456')['lifetime'], expected)
 
     def test_refresh_rotation_scope_and_revocation(self):
         flow = self.grant(scopes='lynse:read lynse:write')
@@ -199,13 +308,14 @@ class AccountOAuthTests(unittest.TestCase):
             seen.append(api.owner_id)
             return {'code': 200, 'data': [{'id': 'meeting-' + api.owner_id}]}
         with patch.object(AccountLynseAPI, 'list_files_by_time_range', files):
-            for token, session, user in [(token_a, session_a, '13900000001'), (token_b, session_b, '13900000002')]:
-                response = self.rpc(token, 'tools/call', {'name': 'list_meetings', 'arguments': {'days': 3}}, session)
-                self.assertEqual(response.status_code, 200, response.text)
-                self.assertIn('meeting-' + user, response.text)
+            for name in ('list_meetings', 'show_meetings', 'read_meetings_view'):
+                for token, session, user in [(token_a, session_a, '13900000001'), (token_b, session_b, '13900000002')]:
+                    response = self.rpc(token, 'tools/call', {'name': name, 'arguments': {'days': 3}}, session)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertIn('meeting-' + user, response.text)
             stolen = self.rpc(token_b, 'tools/list', session=session_a)
             self.assertEqual(stolen.status_code, 404, stolen.text)
-        self.assertEqual(seen, ['13900000001', '13900000002'])
+        self.assertEqual(seen, ['13900000001', '13900000002'] * 3)
         tools = self.rpc(token_a, 'tools/list', session=session_a).json()['result']['tools']
         self.assertNotIn('reset_lynse_key', [tool['name'] for tool in tools])
         write = self.rpc(token_a, 'tools/call', {'name': 'delete_todos', 'arguments': {'todo_ids': ['test'], 'confirm': True}}, session_a)

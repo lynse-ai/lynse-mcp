@@ -7,7 +7,11 @@
     "lynse-mcp": "./bin/lynse-mcp.js"
   },
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v"
+    "test": "python3 -m unittest discover -s tests -v",
+    "build:ui": "node web/build.mjs",
+    "check:ui": "tsc --noEmit -p web/tsconfig.json",
+    "test:ui": "playwright test -c web/playwright.config.ts",
+    "preview:ui": "python3 scripts/preview_apps.py"
   },
   "keywords": [
     "lynse",
@@ -31,6 +35,8 @@
   "files": [
     "lynse_auth.py",
     "lynse_mcp.py",
+    "lynse_ui.py",
+    "web/dist/lynse-app.html",
     "bin/lynse-mcp.js",
     "requirements.txt",
     "requirements-mcp.txt",
@@ -39,5 +45,14 @@
   "engines": {
     "node": ">=18",
     "python": ">=3.11"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "@playwright/test": "^1.58.2",
+    "@tailwindcss/cli": "^4.2.1",
+    "esbuild": "^0.28.1",
+    "lucide": "^0.577.0",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.0"
   }
 }

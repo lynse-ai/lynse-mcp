@@ -1,5 +1,7 @@
 # www.lynse.cn 国内 MCP 部署记录
 
+最新更新：2026-10-31 在同一实例 `i-uf6j5zu4kakq7pwsnxpt` 完成安全修复、CLI 1.8.5 和 MCP Apps 上线，见 [更新与回退记录](deployment-www-lynse-cn-2026-10-31.md)。下文保留 2026-10-10 的首次部署记录。
+
 2026-10-10 通过已配置的阿里云 CLI OAuth profile 和 ECS 云助手完成部署。没有在聊天、脚本参数或上传包中传递阿里云密钥、业务 Token 或 MCP 加密密钥。
 
 ## 地址与实例
