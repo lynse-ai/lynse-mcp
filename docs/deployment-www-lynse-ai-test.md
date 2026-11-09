@@ -83,3 +83,5 @@ node node_modules/vite/bin/vite.js build --config vite.mcp.config.ts --outDir /t
 公网验证通过：`/mcp` 未认证 401 且 `WWW-Authenticate` 指向资源元数据；发现文档 issuer `https://www.lynse.ai/`、resource `https://www.lynse.ai/mcp`；DCR 动态注册可用；`/authorize` 返回 302 票据跳转；`/platform/oauth/test` 与控制台页未登录渲染正常（下发 CSRF 与登录表单）。
 
 待真实账号验证：测试账号短信登录 → 授权一个客户端 → 控制台列表/撤销/删除 → 授权后跨 15 分钟观察 refresh 轮换与会话连续 → 官网重新登录后工具调用恢复（上游凭据刷新路径）。跨 24 小时真实连接与闲置 30 天失效依赖后续观察，自动测试已用虚拟时钟覆盖对应边界。
+
+2026-11-09 起，官网 web 应用（lynse-desktop 仓库 `apps/web`）部署在同一域名 `https://www.lynse.ai/app/`（同源子路径，Node 容器 `127.0.0.1:3102`），其应用授权管理页同源调用本文的 `/platform/oauth/api/*` 桥接，并通过 `token-login` 动作用网页版账号 token 静默建立控制台会话。`/app` 相关 nginx 片段由 lynse-desktop 仓库 `deploy/www-lynse-ai/` 管理，注入同一个 `revelspark` 站点，与本服务的 snippet 互不覆盖。
