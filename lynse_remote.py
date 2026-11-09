@@ -343,7 +343,7 @@ class AccountTools(LynseMCPTools):
 class WebsiteBridge:
     # Login actions run inside a ticket flow or ticketless from the console page;
     # authorization records are always account-scope and never use a ticket.
-    LOGIN_ACTIONS = {"sms", "phone-login", "logout", "wechat-start", "wechat-complete"}
+    LOGIN_ACTIONS = {"sms", "phone-login", "logout", "wechat-start", "wechat-complete", "token-login"}
     ACCOUNT_ACTIONS = {"authorizations", "authorization-revoke", "authorization-delete"}
 
     def __init__(self, provider):
@@ -462,6 +462,20 @@ class WebsiteBridge:
             if not isinstance(code, str) or not re.fullmatch(r"(?:\d{4}|\d{6})", code):
                 raise AccountError("请输入 4 位或 6 位验证码。")
             session = await asyncio.to_thread(self.backend.phone_login, phone, code)
+            session = self._save_session(browser_key, session)
+            self._refresh_grant_credentials(session)
+            return JSONResponse({"user": {"name": session["name"]}})
+        if action == "token-login":
+            # The web console hands over its own account token; verification via
+            # the account backend matches the phone-login trust level without a
+            # second SMS round. Origin/CSRF/rate limits apply as for every
+            # ticketless POST.
+            token = body.get("token", "")
+            if not isinstance(token, str) or not token or len(token) > 512:
+                raise AccountError("登录状态无效，请重新登录网页版。")
+            user = await asyncio.to_thread(self.backend.current_user, token)
+            session = {"upstream_token": token, "subject": str(user["id"]),
+                       "name": str(user.get("nickname") or "Lynse 用户")[:80], "lifetime": 86400}
             session = self._save_session(browser_key, session)
             self._refresh_grant_credentials(session)
             return JSONResponse({"user": {"name": session["name"]}})

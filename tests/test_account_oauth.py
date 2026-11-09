@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from cryptography.fernet import Fernet
 from starlette.testclient import TestClient
 
-from lynse_account import AccountBackend, AccountLynseAPI
+from lynse_account import AccountBackend, AccountError, AccountLynseAPI
 from lynse import LynseAPIError
 from lynse_remote import API_PATH, Settings, create_app
 from lynse_oauth_store import fingerprint
@@ -41,7 +41,8 @@ class FakeBackend:
                 'name': 'User ' + phone[-4:], 'lifetime': 86400}
 
     def current_user(self, token):
-        return {'id': token.removeprefix('private-upstream-').rsplit('-', 1)[0]}
+        user_id = token.removeprefix('private-upstream-').rsplit('-', 1)[0]
+        return {'id': user_id, 'nickname': 'User ' + user_id[-4:]}
 
     def wechat_url(self):
         return 'https://open.weixin.qq.com/connect/oauth2/authorize?appid=test&state=wechat-state&redirect_uri=https%3A%2F%2Fold.test%2Fcallback&scope=snsapi_userinfo'
@@ -413,6 +414,43 @@ class AccountOAuthTests(unittest.TestCase):
         self.assertTrue(write.json()['result']['isError'])
         self.assertIn('read permission only', write.text)
         browser_b.close()
+
+    def test_token_login_bootstraps_console_session(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        provider = self.app.state.oauth_provider
+        grant_id = asyncio.run(provider.verify_token(tokens['access_token'])).claims['grant_id']
+        browser = TestClient(self.app, base_url=WEB)
+        data = browser.get(API_PATH + '/authorizations').json()
+        self.assertIsNone(data['user'])
+        csrf = data['csrf']
+        token = 'private-upstream-13900000001-9'
+        # Origin and CSRF guard the exchange like every ticketless POST.
+        self.assertEqual(browser.post(API_PATH + '/token-login', json={'token': token}).status_code, 403)
+        self.assertEqual(browser.post(API_PATH + '/token-login', json={'token': token},
+            headers={'Origin': WEB, 'X-MCP-CSRF': 'forged'}).status_code, 403)
+        self.assertEqual(browser.post(API_PATH + '/token-login', json={'token': ''},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 400)
+        # An account the backend cannot verify is rejected without detail leaks.
+        with patch.object(self.backend, 'current_user',
+                          side_effect=AccountError('无法验证当前账号，请重新登录。')):
+            stale = browser.post(API_PATH + '/token-login', json={'token': 'stale-token'},
+                headers={'Origin': WEB, 'X-MCP-CSRF': csrf})
+        self.assertEqual(stale.status_code, 400, stale.text)
+        self.assertEqual(stale.json()['error'], '无法验证当前账号，请重新登录。')
+        # A verified token opens the console session and refreshes grant credentials.
+        granted = browser.post(API_PATH + '/token-login', json={'token': token},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf})
+        self.assertEqual(granted.status_code, 200, granted.text)
+        self.assertEqual(granted.json(), {'user': {'name': 'User 0001'}})
+        listed = browser.get(API_PATH + '/authorizations').json()
+        self.assertEqual([item['authorization_id'] for item in listed['authorizations']], [grant_id])
+        grant = provider.store.get('grant', grant_id)
+        self.assertEqual(grant['upstream_token'], token)
+        self.assertGreater(grant['upstream_expires'], time.time() + 23 * 3600)
+        # The upstream token never reaches the database in plaintext.
+        self.assertNotIn(token.encode(), self.db.read_bytes())
+        browser.close()
 
     def test_wechat_state_is_bound_and_single_use(self):
         flow = self.start()
