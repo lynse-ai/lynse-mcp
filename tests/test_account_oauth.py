@@ -35,11 +35,13 @@ class FakeBackend:
 
     def phone_login(self, phone, code):
         self.calls.append(('login', phone, code))
-        return {'upstream_token': 'private-upstream-' + phone, 'subject': phone,
+        # A distinct token per login mirrors the real backend; count grows per call.
+        count = sum(1 for call in self.calls if call[0] == 'login')
+        return {'upstream_token': f'private-upstream-{phone}-{count}', 'subject': phone,
                 'name': 'User ' + phone[-4:], 'lifetime': 86400}
 
     def current_user(self, token):
-        return {'id': token.removeprefix('private-upstream-')}
+        return {'id': token.removeprefix('private-upstream-').rsplit('-', 1)[0]}
 
     def wechat_url(self):
         return 'https://open.weixin.qq.com/connect/oauth2/authorize?appid=test&state=wechat-state&redirect_uri=https%3A%2F%2Fold.test%2Fcallback&scope=snsapi_userinfo'
@@ -241,30 +243,117 @@ class AccountOAuthTests(unittest.TestCase):
             self.assertIn('meeting-after-refresh', result.text)
             self.assertEqual(owners, ['13900000001'])
 
-    def test_refresh_never_extends_upstream_grant_expiry(self):
+    def test_refresh_slides_idle_window_within_absolute_grant_expiry(self):
         flow = self.grant()
         tokens = self.exchange(flow).json()
         provider = self.app.state.oauth_provider
         access = asyncio.run(provider.verify_token(tokens['access_token']))
         grant_id = access.claims['grant_id']
-        expires = provider.store.get('grant', grant_id)['expires']
-        self.assertEqual(provider.store.get('refresh', fingerprint(tokens['refresh_token']))['expires_at'], int(expires))
-        with patch('time.time', return_value=expires - 30):
+        grant = provider.store.get('grant', grant_id)
+        # The grant decouples from the 24h login session; the upstream credential does not.
+        self.assertGreater(grant['expires'], time.time() + 89 * 86400)
+        self.assertLess(grant['upstream_expires'], time.time() + 86400)
+        form = {'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
+                'refresh_token': tokens['refresh_token'], 'resource': RESOURCE}
+        # Refresh works long after the login session died and keeps sliding the
+        # idle window; each stop stays inside the previous window (30 days idle).
+        def slide(at, token, days_out=None):
+            with patch('time.time', return_value=at):
+                step = self.client.post('/token', data=form | {'refresh_token': token})
+                self.assertEqual(step.status_code, 200, step.text)
+                step = step.json()
+                self.assertEqual(provider.store.get('grant', grant_id)['expires'], grant['expires'])
+                if days_out is not None:
+                    expected = int(min(at + days_out * 86400, grant['expires']))
+                    self.assertEqual(provider.store.get('refresh',
+                        fingerprint(step['refresh_token']))['expires_at'], expected)
+                return step
+        start = time.time()
+        chained = slide(start + 25 * 3600, tokens['refresh_token'], 30)
+        chained = slide(start + 25 * 86400, chained['refresh_token'])
+        chained = slide(start + 50 * 86400, chained['refresh_token'])
+        chained = slide(start + 75 * 86400, chained['refresh_token'])
+        # Near the absolute expiry the idle window is capped and refresh stops after it.
+        capped = slide(grant['expires'] - 60, chained['refresh_token'])
+        self.assertEqual(capped['expires_in'], 60)
+        self.assertEqual(provider.store.get('refresh', fingerprint(capped['refresh_token']))['expires_at'], int(grant['expires']))
+        with patch('time.time', return_value=grant['expires'] + 1):
+            response = self.client.post('/token', data=form | {'refresh_token': capped['refresh_token']})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(response.json()['error'], 'invalid_grant')
+            self.assertEqual(self.rpc(capped['access_token'], 'tools/list').status_code, 401)
+
+    def test_refresh_replay_revokes_grant_family(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        form = {'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
+                'refresh_token': tokens['refresh_token'], 'resource': RESOURCE}
+        second = self.client.post('/token', data=form)
+        self.assertEqual(second.status_code, 200, second.text)
+        second = second.json()
+        provider = self.app.state.oauth_provider
+        grant_id = asyncio.run(provider.verify_token(second['access_token'])).claims['grant_id']
+        # Replaying the consumed first-generation token revokes the whole family.
+        replay = self.client.post('/token', data=form)
+        self.assertEqual(replay.status_code, 400, replay.text)
+        self.assertEqual(replay.json()['error'], 'invalid_grant')
+        self.assertEqual(provider.store.get('authorization', grant_id)['status'], 'revoked')
+        self.assertIsNone(asyncio.run(provider.verify_token(second['access_token'])))
+        self.assertEqual(self.client.post('/token', data=form | {'refresh_token': second['refresh_token']}).json()['error'], 'invalid_grant')
+        # A forged unknown token is a plain rejection and does not revoke anything else.
+        forged = self.client.post('/token', data={'client_id': flow['client']['client_id'],
+            'grant_type': 'refresh_token', 'refresh_token': 'z' * 107 + '.', 'resource': RESOURCE})
+        self.assertEqual(forged.json()['error'], 'invalid_grant')
+
+    def test_legacy_grants_without_new_fields_still_validate(self):
+        flow = self.grant()
+        token = self.exchange(flow).json()['access_token']
+        provider = self.app.state.oauth_provider
+        grant_id = asyncio.run(provider.verify_token(token)).claims['grant_id']
+        with provider.store.transaction() as db:
+            legacy = provider.store.read(db, 'grant', grant_id)
+            legacy.pop('idle_expires', None)
+            legacy.pop('upstream_expires', None)
+            provider.store.write(db, 'grant', grant_id, legacy, legacy['expires'])
+        self.assertIsNotNone(asyncio.run(provider.verify_token(token)))
+
+    def test_website_login_refreshes_upstream_credentials(self):
+        flow = self.grant()
+        other = TestClient(self.app, base_url=WEB)
+        foreign = self.grant('13900000002', web=other, client=flow['client'])
+        provider = self.app.state.oauth_provider
+        tokens = self.exchange(flow).json()
+        grant_id = asyncio.run(provider.verify_token(tokens['access_token'])).claims['grant_id']
+        foreign_id = asyncio.run(provider.verify_token(
+            self.exchange(foreign).json()['access_token'])).claims['grant_id']
+        foreign_upstream = provider.store.get('grant', foreign_id)['upstream_expires']
+        session = self.initialize(tokens['access_token'])
+        with patch('time.time', return_value=time.time() + 25 * 3600):
             refreshed = self.client.post('/token', data={
                 'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
                 'refresh_token': tokens['refresh_token'], 'resource': RESOURCE})
             self.assertEqual(refreshed.status_code, 200, refreshed.text)
-            tokens = refreshed.json()
-            self.assertEqual(tokens['expires_in'], 30)
-            self.assertEqual(provider.store.get('grant', grant_id)['expires'], expires)
-            self.assertEqual(provider.store.get('refresh', fingerprint(tokens['refresh_token']))['expires_at'], int(expires))
-        with patch('time.time', return_value=expires + 1):
-            response = self.client.post('/token', data={
-                'client_id': flow['client']['client_id'], 'grant_type': 'refresh_token',
-                'refresh_token': tokens['refresh_token'], 'resource': RESOURCE})
-            self.assertEqual(response.status_code, 400, response.text)
-            self.assertEqual(response.json()['error'], 'invalid_grant')
-            self.assertEqual(self.rpc(tokens['access_token'], 'tools/list').status_code, 401)
+            access = refreshed.json()['access_token']
+            # The stale upstream credential explains itself without leaking it.
+            with patch.object(AccountLynseAPI, 'list_files_by_time_range') as calls:
+                stale = self.rpc(access, 'tools/call', {'name': 'list_meetings', 'arguments': {'days': 3}}, session)
+            self.assertTrue(stale.json()['result'].get('isError'))
+            self.assertIn('sign in again on the website', stale.text)
+            calls.assert_not_called()
+            # A fresh website login hands the account's grants new credentials.
+            console = TestClient(self.app, base_url=WEB)
+            csrf = console.get(API_PATH + '/authorizations').json()['csrf']
+            self.assertEqual(console.post(API_PATH + '/phone-login', json={'phone': '13900000001', 'code': '123456'},
+                headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 200)
+            grant = provider.store.get('grant', grant_id)
+            self.assertGreater(grant['upstream_expires'], time.time() + 23 * 3600)
+            # Only this account's grants are refreshed.
+            self.assertEqual(provider.store.get('grant', foreign_id)['upstream_expires'], foreign_upstream)
+            with patch.object(AccountLynseAPI, 'list_files_by_time_range', return_value={'code': 200, 'data': []}):
+                result = self.rpc(access, 'tools/call', {'name': 'list_meetings', 'arguments': {'days': 3}}, session)
+            self.assertFalse(result.json()['result'].get('isError', False))
+            console.close()
+        other.close()
 
     def test_account_login_lifetime_respects_upstream_and_local_cap(self):
         backend = AccountBackend('https://api.lynse.cn')
@@ -566,8 +655,9 @@ class AccountOAuthTests(unittest.TestCase):
                 headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 200)
             console.close()
         self.assertEqual(self.web.get(API_PATH + '/authorizations').json()['authorizations'], [])
-        # a still-valid record cannot be deleted directly
-        flow = self.grant(client=flow['client'])
+        # a still-valid record cannot be deleted directly (fresh client: the
+        # original 90-day DCR record was cleaned up in the expired timeline)
+        flow = self.grant()
         tokens = self.exchange(flow).json()
         grant_id = asyncio.run(provider.verify_token(tokens['access_token'])).claims['grant_id']
         csrf = self.web.get(API_PATH + '/authorizations').json()['csrf']

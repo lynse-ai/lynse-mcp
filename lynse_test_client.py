@@ -76,7 +76,7 @@ class TestOAuthClient:
                           "scope": "lynse:read", "resource": self.settings.resource}
                 response = RedirectResponse(self.provider.issuer + "authorize?" + urlencode(params), status_code=302)
                 response.set_cookie(COOKIE, cookie, httponly=True, secure=self.settings.web_origin.startswith("https:"),
-                                    samesite="lax", path="/platform/oauth", max_age=3600)
+                                    samesite="lax", path="/platform/oauth", max_age=86400)
                 return response
             if action == "/callback":
                 state = request.query_params.get("state", "")

@@ -59,6 +59,8 @@ class Settings:
     wechat_type: str = "WECHAT_JUMP"
     redirect_schemes: tuple[str, ...] = ("workbuddy", "cursor", "vscode")
     test_ui: bool = False
+    grant_days: int = 90
+    refresh_idle_days: int = 30
 
     def __post_init__(self):
         secure_origin(self.resource)
@@ -69,6 +71,8 @@ class Settings:
                 raise ValueError("Website/API origin must have no path or trailing slash")
         if self.wechat_callback and self.wechat_callback != self.web_origin + "/platform/oauth/wechat":
             raise ValueError("WeChat callback must be the website's /platform/oauth/wechat page")
+        if min(self.grant_days, self.refresh_idle_days) < 1 or self.refresh_idle_days > self.grant_days:
+            raise ValueError("Grant windows must be positive and the idle window cannot exceed it")
 
     @classmethod
     def from_env(cls):
@@ -83,6 +87,8 @@ class Settings:
             redirect_schemes=tuple(os.environ.get(
                 "LYNSE_MCP_REDIRECT_SCHEMES", "workbuddy,cursor,vscode").split(",")),
             test_ui=os.environ.get("LYNSE_MCP_TEST_UI", "0") == "1",
+            grant_days=int(os.environ.get("LYNSE_MCP_GRANT_DAYS", "90")),
+            refresh_idle_days=int(os.environ.get("LYNSE_MCP_REFRESH_IDLE_DAYS", "30")),
         )
 
 
@@ -126,7 +132,10 @@ class AccountOAuthProvider:
             ) or p.scheme in self.settings.redirect_schemes
             if not allowed or p.fragment or p.username or p.password:
                 raise RegistrationError("invalid_redirect_uri", "Redirect URI is not permitted")
-        self.store.put("client", client.client_id, client.model_dump(mode="json"), time.time() + 90 * 86400)
+        # DCR is open, so this TTL only bounds cleanup, not trust — but it must
+        # outlive the longest grant a client authorizes, or active grants lose
+        # their client record at the exact moment they expire.
+        self.store.put("client", client.client_id, client.model_dump(mode="json"), time.time() + 365 * 86400)
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams):
         if params.resource != self.settings.resource:
@@ -155,16 +164,20 @@ class AccountOAuthProvider:
         grant = self.store.read(db, "grant", grant_id)
         if not grant or not set(scopes).issubset(grant["scopes"]):
             raise TokenError("invalid_grant", "Authorization expired; sign in again")
-        access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
-        lifetime = min(900, int(grant["expires"] - time.time()))
-        if lifetime <= 0:
+        moment = time.time()
+        # Refresh tokens slide a fresh idle window on every use, capped by the grant's absolute expiry.
+        idle = min(moment + self.settings.refresh_idle_days * 86400, grant["expires"])
+        if idle <= moment or grant.get("idle_expires", grant["expires"]) <= moment:
             raise TokenError("invalid_grant", "Authorization expired")
+        access, refresh = secrets.token_urlsafe(32), f"{grant_id}.{secrets.token_urlsafe(48)}"
+        lifetime = min(900, int(grant["expires"] - moment))
         common = {"client_id": client_id, "grant_id": grant_id, "scopes": scopes,
                   "subject": grant["subject"], "resource": self.settings.resource}
-        self.store.write(db, "access", fingerprint(access), common | {"expires_at": int(time.time()) + lifetime},
-                         time.time() + lifetime)
-        self.store.write(db, "refresh", fingerprint(refresh), common | {"expires_at": int(grant["expires"])},
-                         grant["expires"])
+        self.store.write(db, "access", fingerprint(access), common | {"expires_at": int(moment) + lifetime},
+                         moment + lifetime)
+        self.store.write(db, "refresh", fingerprint(refresh), common | {"expires_at": int(idle)}, idle)
+        grant["idle_expires"] = idle
+        self.store.write(db, "grant", grant_id, grant, grant["expires"])
         return OAuthToken(access_token=access, token_type="Bearer", expires_in=lifetime,
                           refresh_token=refresh, scope=" ".join(scopes))
 
@@ -177,24 +190,59 @@ class AccountOAuthProvider:
             self.store.delete(db, "code", key)
             return self._issue(db, client.client_id, value["grant_id"], value["scopes"])
 
-    async def load_refresh_token(self, client, refresh_token):
-        value = self.store.get("refresh", fingerprint(refresh_token))
-        if not value or value["client_id"] != client.client_id:
+    async def load_refresh_token(self, client, refresh_token: str):
+        key = fingerprint(refresh_token)
+        value = self.store.get("refresh", key)
+        if not value:
+            # RFC 9700 4.14: presenting a rotated (consumed) refresh token revokes
+            # its whole grant family; the SDK turns the missing row into invalid_grant.
+            grant_id = self._refresh_grant_id(refresh_token)
+            ring = self.store.get("consumed", grant_id) if grant_id else None
+            if ring and key in ring["fingerprints"]:
+                with self.store.transaction() as db:
+                    self._revoke_grant(db, grant_id)
+            return None
+        if value["client_id"] != client.client_id:
             return None
         return GrantRefresh(token=refresh_token, **value)
 
+    @staticmethod
+    def _refresh_grant_id(token: str) -> str:
+        head, _, _ = token.partition(".")
+        return head if re.fullmatch(r"[A-Za-z0-9_-]{43}", head) else ""
+
+    def _check_refresh_replay(self, db, token: str):
+        """RFC 9700 4.14: reusing a rotated refresh token revokes its whole grant family."""
+        grant_id = self._refresh_grant_id(token)
+        ring = self.store.read(db, "consumed", grant_id) if grant_id else None
+        if ring and fingerprint(token) in ring["fingerprints"]:
+            self._revoke_grant(db, grant_id)
+            raise TokenError("invalid_grant", "Refresh token replay detected")
+
+    def _mark_consumed(self, db, grant_id: str, key: str, retention: float):
+        ring = self.store.read(db, "consumed", grant_id) or {"fingerprints": []}
+        ring["fingerprints"] = (ring["fingerprints"] + [key])[-128:]
+        self.store.write(db, "consumed", grant_id, ring, retention)
+
     async def exchange_refresh_token(self, client, refresh_token, scopes):
         with self.store.transaction() as db:
-            key = fingerprint(refresh_token.token)
+            token = refresh_token.token
+            key = fingerprint(token)
             value = self.store.read(db, "refresh", key)
             if not value or value["client_id"] != client.client_id or not set(scopes).issubset(value["scopes"]):
+                self._check_refresh_replay(db, token)
                 raise TokenError("invalid_grant", "Refresh token already used or expired")
+            grant = self.store.read(db, "grant", value["grant_id"])
+            if not grant or grant.get("idle_expires", grant["expires"]) <= time.time():
+                raise TokenError("invalid_grant", "Authorization expired; sign in again")
             self.store.delete(db, "refresh", key)
+            self._mark_consumed(db, value["grant_id"], key, grant["expires"])
             return self._issue(db, client.client_id, value["grant_id"], scopes)
 
     async def verify_token(self, token: str):
         value = self.store.get("access", fingerprint(token))
-        if not value or not self.store.get("grant", value["grant_id"]):
+        grant = self.store.get("grant", value["grant_id"]) if value else None
+        if not value or not grant or grant.get("idle_expires", grant["expires"]) <= time.time():
             return None
         return AccessToken(token=token, client_id=value["client_id"], scopes=value["scopes"],
                            expires_at=value["expires_at"], resource=self.settings.resource,
@@ -218,16 +266,32 @@ class AccountOAuthProvider:
         if record is not None:
             record["status"], record["revoked_at"] = "revoked", time.time()
             self.store.write(db, "authorization", grant_id, record, time.time() + RETENTION)
+        # Deleting the grant row is what kills the family: verify_token and the
+        # refresh path both require it, so lingering token rows turn inert.
         self.store.delete(db, "grant", grant_id)
-        for kind in ("access", "refresh"):
-            for key, value in list(self.store.scan(db, kind)):
-                if value.get("grant_id") == grant_id:
-                    self.store.delete(db, kind, key)
+        self.store.delete(db, "consumed", grant_id)
+
+    def _index_grant(self, db, subject: str, grant_id: str, retention: float):
+        key = fingerprint(subject)
+        entry = self.store.read(db, "user-grants", key) or []
+        if grant_id not in entry:
+            self.store.write(db, "user-grants", key, entry + [grant_id], retention)
+
+    def _unindex_grant(self, db, subject: str, grant_id: str):
+        key = fingerprint(subject)
+        entry = self.store.read(db, "user-grants", key) or []
+        if grant_id in entry:
+            entry.remove(grant_id)
+            if entry:
+                self.store.write(db, "user-grants", key, entry, time.time() + RETENTION)
+            else:
+                self.store.delete(db, "user-grants", key)
 
     def list_authorizations(self, subject: str):
         with self.store.transaction() as db:
-            records = [(key, value) for key, value in self.store.scan(db, "authorization")
-                       if value.get("subject") == subject]
+            grant_ids = self.store.read(db, "user-grants", fingerprint(subject)) or []
+            records = [(key, value) for key in grant_ids
+                       if (value := self.store.read(db, "authorization", key))]
         records.sort(key=lambda item: item[1].get("authorized_at", 0), reverse=True)
         return [authorization_view(key, value) for key, value in records]
 
@@ -238,6 +302,8 @@ class AccountOAuthProvider:
         grant = self.store.get("grant", (access.claims or {}).get("grant_id", ""))
         if not grant or grant["subject"] != access.subject:
             raise ValueError("Authorization expired or revoked; reconnect")
+        if grant.get("upstream_expires", grant["expires"]) <= time.time():
+            raise ValueError("Lynse login expired; sign in again on the website to refresh this connection")
         return access, grant
 
 
@@ -319,7 +385,7 @@ class WebsiteBridge:
                                          "csrf": pending["csrf"], "user": {"name": session["name"]} if session else None,
                                          "wechat_enabled": bool(self.settings.wechat_callback)})
                 response.set_cookie(COOKIE, cookie, httponly=True, secure=self.settings.web_origin.startswith("https:"),
-                                    samesite="lax", path="/platform/oauth", max_age=3600)
+                                    samesite="lax", path="/platform/oauth", max_age=86400)
                 return response
             if request.method != "POST":
                 return JSONResponse({"error": "Method not allowed"}, status_code=405)
@@ -350,16 +416,22 @@ class WebsiteBridge:
                         redirect_args["error"] = "access_denied"
                     else:
                         code, grant_id = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-                        expires = session["expires"]
+                        # The grant owns its own absolute lifetime, decoupled from the
+                        # browser login session; the upstream credential keeps the
+                        # session's short lifetime and is refreshed by website logins.
+                        now = time.time()
+                        expires = now + self.provider.settings.grant_days * 86400
                         grant = {"subject": session["subject"], "upstream_token": session["upstream_token"],
-                                 "scopes": params["scopes"], "expires": expires}
+                                 "upstream_expires": session["expires"], "scopes": params["scopes"],
+                                 "expires": expires, "idle_expires": now + self.provider.settings.refresh_idle_days * 86400}
                         self.store.write(db, "grant", grant_id, grant, expires)
                         self.store.write(db, "authorization", grant_id, {
                             "subject": session["subject"], "client_id": pending["client_id"],
                             "client_name": pending["client_name"], "grant_type": "oauth",
-                            "scopes": params["scopes"], "authorized_at": time.time(),
+                            "scopes": params["scopes"], "authorized_at": now,
                             "grant_expires": expires, "status": "valid", "revoked_at": None,
                         }, expires + RETENTION)
+                        self.provider._index_grant(db, session["subject"], grant_id, expires + RETENTION)
                         auth_code = {"client_id": pending["client_id"], "grant_id": grant_id,
                                      "scopes": params["scopes"], "expires_at": time.time() + 120,
                                      "subject": session["subject"], "code_challenge": params["code_challenge"],
@@ -390,7 +462,8 @@ class WebsiteBridge:
             if not isinstance(code, str) or not re.fullmatch(r"(?:\d{4}|\d{6})", code):
                 raise AccountError("请输入 4 位或 6 位验证码。")
             session = await asyncio.to_thread(self.backend.phone_login, phone, code)
-            self._save_session(browser_key, session)
+            session = self._save_session(browser_key, session)
+            self._refresh_grant_credentials(session)
             return JSONResponse({"user": {"name": session["name"]}})
         if action == "logout":
             with self.store.transaction() as db:
@@ -418,14 +491,15 @@ class WebsiteBridge:
                 raise AccountError("微信登录状态无效或已过期，请重新登录。")
             self.store.delete(db, "wechat", fingerprint(state))
         session = await asyncio.to_thread(self.backend.wechat_login, code, state)
-        self._save_session(browser_key, session)
+        session = self._save_session(browser_key, session)
+        self._refresh_grant_credentials(session)
         return JSONResponse({"user": {"name": session["name"]}})
 
     def _browser_csrf(self, db, browser_key, create=True):
         guard = self.store.read(db, "browser-csrf", browser_key)
         if guard is None and create:
             guard = {"csrf": secrets.token_urlsafe(32)}
-            self.store.write(db, "browser-csrf", browser_key, guard, time.time() + 3600)
+            self.store.write(db, "browser-csrf", browser_key, guard, time.time() + 86400)
         return guard
 
     async def _account(self, request, action, body, cookie, browser_key):
@@ -451,7 +525,7 @@ class WebsiteBridge:
                 "authorizations": self.provider.list_authorizations(session["subject"]) if session else []})
             response.set_cookie(COOKIE, cookie, httponly=True,
                                 secure=self.settings.web_origin.startswith("https:"),
-                                samesite="lax", path="/platform/oauth", max_age=3600)
+                                samesite="lax", path="/platform/oauth", max_age=86400)
             return response
         if action in self.LOGIN_ACTIONS:
             return await self._login_action(action, body, browser_key, None)
@@ -474,11 +548,25 @@ class WebsiteBridge:
                 raise AccountError("请先撤销授权，再删除该记录。")
             else:
                 self.store.delete(db, "authorization", authorization_id)
+                self.provider._unindex_grant(db, session["subject"], authorization_id)
         return JSONResponse({"ok": True})
+
+    def _refresh_grant_credentials(self, session):
+        """A fresh website login hands the account's active grants new upstream
+        credentials; grants keep their own absolute and idle windows untouched."""
+        now = time.time()
+        with self.store.transaction() as db:
+            for grant_id in self.store.read(db, "user-grants", fingerprint(session["subject"])) or []:
+                grant = self.store.read(db, "grant", grant_id)
+                if grant and grant["expires"] > now and grant.get("upstream_token") != session["upstream_token"]:
+                    grant["upstream_token"] = session["upstream_token"]
+                    grant["upstream_expires"] = session["expires"]
+                    self.store.write(db, "grant", grant_id, grant, grant["expires"])
 
     def _save_session(self, key, session):
         session = session | {"expires": time.time() + session["lifetime"]}
-        self.store.put("browser", key, session, min(session["expires"], time.time() + 3600))
+        self.store.put("browser", key, session, session["expires"])
+        return session
 
 
 class OAuthSecurityMiddleware(BaseHTTPMiddleware):

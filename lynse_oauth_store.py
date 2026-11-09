@@ -1,7 +1,6 @@
 """Durable, encrypted OAuth state for a single ECS deployment."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -14,6 +13,33 @@ from cryptography.fernet import Fernet
 
 def fingerprint(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
+
+
+class _Transaction:
+    """Write transaction. Deliberately class-based instead of @contextmanager:
+    contextlib's __exit__ re-assigns __traceback__ on the active exception, which
+    the SDK's frozen-dataclass TokenError rejects (dataclasses __setattr__)."""
+
+    def __init__(self, store: "OAuthStore"):
+        self.store = store
+        self.db = None
+
+    def __enter__(self):
+        self.db = sqlite3.connect(self.store.path, timeout=10)
+        self.db.execute("BEGIN IMMEDIATE")
+        return self.db
+
+    def __exit__(self, typ, value, tb):
+        if self.db is not None:
+            try:
+                if typ is None:
+                    self.db.commit()
+                else:
+                    self.db.rollback()
+            finally:
+                self.db.close()
+                self.db = None
+        return False
 
 
 class OAuthStore:
@@ -29,18 +55,8 @@ class OAuthStore:
                        "(kind TEXT, id TEXT, payload BLOB NOT NULL, expires REAL NOT NULL, "
                        "PRIMARY KEY(kind, id))")
 
-    @contextmanager
     def transaction(self):
-        db = sqlite3.connect(self.path, timeout=10)
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        return _Transaction(self)
 
     def read(self, db, kind: str, key: str):
         row = db.execute("SELECT payload, expires FROM records WHERE kind=? AND id=?",
@@ -68,14 +84,18 @@ class OAuthStore:
                    (kind, key, payload, expires))
 
     def get(self, kind: str, key: str):
-        with self.transaction() as db:
+        # Hot path (every MCP request verifies tokens): read without taking the write lock.
+        db = sqlite3.connect(self.path, timeout=10)
+        try:
             return self.read(db, kind, key)
+        finally:
+            db.close()
 
     def put(self, kind: str, key: str, value: dict, expires: float):
         with self.transaction() as db:
             db.execute("DELETE FROM records WHERE expires <= ?", (time.time(),))
             count = db.execute("SELECT COUNT(*) FROM records").fetchone()[0]
-            if count >= 50000:
+            if count >= 500000:
                 raise ValueError("OAuth storage capacity reached")
             self.write(db, kind, key, value, expires)
 
