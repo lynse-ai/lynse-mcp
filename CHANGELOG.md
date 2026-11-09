@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 (2026-11-09)
+
+### New Features
+
+- Add an account console for authorization records: list, revoke, and delete granted applications through the website bridge API (`/platform/oauth/api/authorizations*`), with revoked and expired records retained until user deletion and an optional test-UI management page.
+- Give every authorization its own absolute lifetime (90 days by default, `LYNSE_MCP_GRANT_DAYS`) instead of inheriting the browser login session's ≤24h expiry, so third-party clients reconnect on the order of months rather than daily.
+
+### Changed
+
+- Rotate the refresh token on every use and slide a fresh 30-day idle window (`LYNSE_MCP_REFRESH_IDLE_DAYS`), always capped by the grant's absolute expiry; idle connections expire after the unused window.
+- Revoke the whole grant family when a rotated refresh token is replayed (RFC 9700), while forged unknown tokens are rejected without side effects.
+- Refresh the upstream credentials of a user's active grants whenever they sign in on the website again, so long-lived connections recover from the ≤24h upstream token until the account backend offers renewable credentials.
+- Extend the authorization-page cookie and browser login state to the full session lifetime (up to 24h) instead of one hour.
+- Keep DCR client records for 365 days so they outlive the grants they authorize.
+- Scale the OAuth store for many users: per-subject and consumed-token indexes replace full-table scans, token lookups no longer take the write lock, capacity raised to 500k rows, and write transactions preserve the SDK's frozen-dataclass token errors on Python 3.14.
+
 ## 0.1.0 (2026-11-01)
 
 ### New Features
