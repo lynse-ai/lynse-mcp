@@ -36,6 +36,8 @@ READ = "lynse:read"
 WRITE = "lynse:write"
 COOKIE = "lynse_mcp_browser"
 API_PATH = "/platform/oauth/api"
+# Revoked and expired authorization records stay visible for this long.
+RETENTION = 180 * 86400
 
 
 def secure_origin(value: str) -> str:
@@ -90,6 +92,18 @@ class GrantCode(AuthorizationCode):
 
 class GrantRefresh(RefreshToken):
     grant_id: str
+
+
+def authorization_view(grant_id: str, record: dict, now: float | None = None):
+    """Public view of one authorization record; no secrets ever leave the store."""
+    moment = time.time() if now is None else now
+    status = record.get("status", "valid")
+    if status == "valid" and record.get("grant_expires", 0) <= moment:
+        status = "expired"
+    return {"authorization_id": grant_id, "client_id": record["client_id"],
+            "client_name": record["client_name"], "grant_type": record.get("grant_type", "oauth"),
+            "scopes": record["scopes"], "status": status,
+            "authorized_at": record["authorized_at"], "expires_at": record["grant_expires"]}
 
 
 class AccountOAuthProvider:
@@ -194,8 +208,28 @@ class AccountOAuthProvider:
             for kind in ("access", "refresh"):
                 value = self.store.read(db, kind, fingerprint(token.token))
                 if value:
-                    self.store.delete(db, "grant", value["grant_id"])
-                    self.store.delete(db, kind, fingerprint(token.token))
+                    # RFC 7009 revocation ends the whole authorization; the
+                    # record stays visible as revoked for the user to delete.
+                    self._revoke_grant(db, value["grant_id"])
+                    break
+
+    def _revoke_grant(self, db, grant_id: str):
+        record = self.store.read(db, "authorization", grant_id)
+        if record is not None:
+            record["status"], record["revoked_at"] = "revoked", time.time()
+            self.store.write(db, "authorization", grant_id, record, time.time() + RETENTION)
+        self.store.delete(db, "grant", grant_id)
+        for kind in ("access", "refresh"):
+            for key, value in list(self.store.scan(db, kind)):
+                if value.get("grant_id") == grant_id:
+                    self.store.delete(db, kind, key)
+
+    def list_authorizations(self, subject: str):
+        with self.store.transaction() as db:
+            records = [(key, value) for key, value in self.store.scan(db, "authorization")
+                       if value.get("subject") == subject]
+        records.sort(key=lambda item: item[1].get("authorized_at", 0), reverse=True)
+        return [authorization_view(key, value) for key, value in records]
 
     def principal(self):
         access = get_access_token()
@@ -241,6 +275,11 @@ class AccountTools(LynseMCPTools):
 
 
 class WebsiteBridge:
+    # Login actions run inside a ticket flow or ticketless from the console page;
+    # authorization records are always account-scope and never use a ticket.
+    LOGIN_ACTIONS = {"sms", "phone-login", "logout", "wechat-start", "wechat-complete"}
+    ACCOUNT_ACTIONS = {"authorizations", "authorization-revoke", "authorization-delete"}
+
     def __init__(self, provider):
         self.provider = provider
         self.store, self.backend, self.settings = provider.store, provider.backend, provider.settings
@@ -251,10 +290,15 @@ class WebsiteBridge:
             if not isinstance(body, dict):
                 raise AccountError("授权请求无效，请重新连接。")
             ticket = body.get("ticket") or request.query_params.get("ticket", "")
-            if not isinstance(ticket, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", ticket):
-                raise AccountError("授权链接无效，请从 MCP 客户端重新连接。")
+            if not isinstance(ticket, str):
+                raise AccountError("授权请求无效，请重新连接。")
+            action = request.path_params["action"]
             cookie = request.cookies.get(COOKIE) or secrets.token_urlsafe(32)
             browser_key = fingerprint(cookie)
+            if action in self.ACCOUNT_ACTIONS or (action in self.LOGIN_ACTIONS and not ticket):
+                return await self._account(request, action, body, cookie, browser_key)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{43}", ticket):
+                raise AccountError("授权链接无效，请从 MCP 客户端重新连接。")
             key = fingerprint(ticket)
             with self.store.transaction() as db:
                 pending = self.store.read(db, "pending", key)
@@ -269,7 +313,6 @@ class WebsiteBridge:
                 else:
                     pending["browser"] = browser_key
                     self.store.write(db, "pending", key, pending, pending["expires"])
-            action = request.path_params["action"]
             if action == "context" and request.method == "GET":
                 session = self.store.get("browser", browser_key)
                 response = JSONResponse({"client_name": pending["client_name"], "scopes": pending["params"]["scopes"],
@@ -283,48 +326,8 @@ class WebsiteBridge:
             peer = request.client.host if request.client else "unknown"
             if self.store.rate_limit("website:" + peer + ":" + action, 20, 600):
                 return JSONResponse({"error": "操作过于频繁，请稍后重试。"}, status_code=429)
-            if action in {"sms", "phone-login"}:
-                phone = body.get("phone", "")
-                if not isinstance(phone, str) or not re.fullmatch(r"1[3-9]\d{9}", phone):
-                    raise AccountError("请输入有效的中国大陆手机号。")
-                if action == "sms":
-                    if self.store.rate_limit("sms:" + fingerprint(phone), 1, 60):
-                        return JSONResponse({"error": "请稍后再发送验证码。"}, status_code=429)
-                    return JSONResponse(await asyncio.to_thread(self.backend.sms, phone))
-                code = body.get("code", "")
-                if not isinstance(code, str) or not re.fullmatch(r"(?:\d{4}|\d{6})", code):
-                    raise AccountError("请输入 4 位或 6 位验证码。")
-                session = await asyncio.to_thread(self.backend.phone_login, phone, code)
-                self._save_session(browser_key, session)
-                return JSONResponse({"user": {"name": session["name"]}})
-            if action == "logout":
-                with self.store.transaction() as db:
-                    self.store.delete(db, "browser", browser_key)
-                return JSONResponse({"ok": True})
-            if action == "wechat-start":
-                if not self.settings.wechat_callback:
-                    raise AccountError("微信登录暂未配置，请使用手机验证码登录。")
-                url = await asyncio.to_thread(self.backend.wechat_url)
-                p = urlsplit(url)
-                query = parse_qs(p.query)
-                state = (query.get("state") or [""])[0]
-                if p.scheme != "https" or p.hostname != "open.weixin.qq.com" or not state:
-                    raise AccountError("微信登录配置异常，请使用手机验证码登录。")
-                query["redirect_uri"] = [self.settings.wechat_callback]
-                self.store.put("wechat", fingerprint(state), {"browser": browser_key, "ticket": key}, time.time() + 300)
-                return JSONResponse({"url": urlunsplit((p.scheme, p.netloc, p.path, urlencode(query, doseq=True), p.fragment))})
-            if action == "wechat-complete":
-                state, code = body.get("state", ""), body.get("code", "")
-                if not isinstance(state, str) or not isinstance(code, str) or not code or len(code) > 512:
-                    raise AccountError("微信登录回调无效，请重新登录。")
-                with self.store.transaction() as db:
-                    flow = self.store.read(db, "wechat", fingerprint(state))
-                    if not flow or flow["browser"] != browser_key or flow["ticket"] != key:
-                        raise AccountError("微信登录状态无效或已过期，请重新登录。")
-                    self.store.delete(db, "wechat", fingerprint(state))
-                session = await asyncio.to_thread(self.backend.wechat_login, code, state)
-                self._save_session(browser_key, session)
-                return JSONResponse({"user": {"name": session["name"]}})
+            if action in self.LOGIN_ACTIONS:
+                return await self._login_action(action, body, browser_key, key)
             if action == "consent":
                 decision = body.get("decision")
                 if decision not in {"allow", "deny"}:
@@ -351,6 +354,12 @@ class WebsiteBridge:
                         grant = {"subject": session["subject"], "upstream_token": session["upstream_token"],
                                  "scopes": params["scopes"], "expires": expires}
                         self.store.write(db, "grant", grant_id, grant, expires)
+                        self.store.write(db, "authorization", grant_id, {
+                            "subject": session["subject"], "client_id": pending["client_id"],
+                            "client_name": pending["client_name"], "grant_type": "oauth",
+                            "scopes": params["scopes"], "authorized_at": time.time(),
+                            "grant_expires": expires, "status": "valid", "revoked_at": None,
+                        }, expires + RETENTION)
                         auth_code = {"client_id": pending["client_id"], "grant_id": grant_id,
                                      "scopes": params["scopes"], "expires_at": time.time() + 120,
                                      "subject": session["subject"], "code_challenge": params["code_challenge"],
@@ -366,6 +375,106 @@ class WebsiteBridge:
             exc = sys.exception()
             message = str(exc) if isinstance(exc, AccountError) else "授权请求无效，请重新连接。"
             return JSONResponse({"error": message}, status_code=400)
+
+    async def _login_action(self, action, body, browser_key, ticket_key):
+        """Shared login/logout/wechat handling for ticket and console flows."""
+        if action in {"sms", "phone-login"}:
+            phone = body.get("phone", "")
+            if not isinstance(phone, str) or not re.fullmatch(r"1[3-9]\d{9}", phone):
+                raise AccountError("请输入有效的中国大陆手机号。")
+            if action == "sms":
+                if self.store.rate_limit("sms:" + fingerprint(phone), 1, 60):
+                    return JSONResponse({"error": "请稍后再发送验证码。"}, status_code=429)
+                return JSONResponse(await asyncio.to_thread(self.backend.sms, phone))
+            code = body.get("code", "")
+            if not isinstance(code, str) or not re.fullmatch(r"(?:\d{4}|\d{6})", code):
+                raise AccountError("请输入 4 位或 6 位验证码。")
+            session = await asyncio.to_thread(self.backend.phone_login, phone, code)
+            self._save_session(browser_key, session)
+            return JSONResponse({"user": {"name": session["name"]}})
+        if action == "logout":
+            with self.store.transaction() as db:
+                self.store.delete(db, "browser", browser_key)
+            return JSONResponse({"ok": True})
+        if action == "wechat-start":
+            if not self.settings.wechat_callback:
+                raise AccountError("微信登录暂未配置，请使用手机验证码登录。")
+            url = await asyncio.to_thread(self.backend.wechat_url)
+            p = urlsplit(url)
+            query = parse_qs(p.query)
+            state = (query.get("state") or [""])[0]
+            if p.scheme != "https" or p.hostname != "open.weixin.qq.com" or not state:
+                raise AccountError("微信登录配置异常，请使用手机验证码登录。")
+            query["redirect_uri"] = [self.settings.wechat_callback]
+            self.store.put("wechat", fingerprint(state),
+                           {"browser": browser_key, "ticket": ticket_key}, time.time() + 300)
+            return JSONResponse({"url": urlunsplit((p.scheme, p.netloc, p.path, urlencode(query, doseq=True), p.fragment))})
+        state, code = body.get("state", ""), body.get("code", "")
+        if not isinstance(state, str) or not isinstance(code, str) or not code or len(code) > 512:
+            raise AccountError("微信登录回调无效，请重新登录。")
+        with self.store.transaction() as db:
+            flow = self.store.read(db, "wechat", fingerprint(state))
+            if not flow or flow["browser"] != browser_key or flow["ticket"] != ticket_key:
+                raise AccountError("微信登录状态无效或已过期，请重新登录。")
+            self.store.delete(db, "wechat", fingerprint(state))
+        session = await asyncio.to_thread(self.backend.wechat_login, code, state)
+        self._save_session(browser_key, session)
+        return JSONResponse({"user": {"name": session["name"]}})
+
+    def _browser_csrf(self, db, browser_key, create=True):
+        guard = self.store.read(db, "browser-csrf", browser_key)
+        if guard is None and create:
+            guard = {"csrf": secrets.token_urlsafe(32)}
+            self.store.write(db, "browser-csrf", browser_key, guard, time.time() + 3600)
+        return guard
+
+    async def _account(self, request, action, body, cookie, browser_key):
+        """Account-scope console actions: list, revoke, delete, ticketless login."""
+        if (request.method == "GET") != (action == "authorizations"):
+            return JSONResponse({"error": "Method not allowed"}, status_code=405)
+        if request.method == "POST":
+            if request.headers.get("origin") != self.settings.web_origin:
+                return JSONResponse({"error": "授权请求校验失败，请重新打开页面。"}, status_code=403)
+            peer = request.client.host if request.client else "unknown"
+            if self.store.rate_limit("website:" + peer + ":" + action, 20, 600):
+                return JSONResponse({"error": "操作过于频繁，请稍后重试。"}, status_code=429)
+            with self.store.transaction() as db:
+                guard = self._browser_csrf(db, browser_key, create=False)
+            if not guard or not secrets.compare_digest(request.headers.get("x-mcp-csrf", ""), guard["csrf"]):
+                return JSONResponse({"error": "授权请求校验失败，请重新打开页面。"}, status_code=403)
+        if action == "authorizations":
+            with self.store.transaction() as db:
+                guard = self._browser_csrf(db, browser_key)
+            session = self.store.get("browser", browser_key)
+            response = JSONResponse({
+                "user": {"name": session["name"]} if session else None, "csrf": guard["csrf"],
+                "authorizations": self.provider.list_authorizations(session["subject"]) if session else []})
+            response.set_cookie(COOKIE, cookie, httponly=True,
+                                secure=self.settings.web_origin.startswith("https:"),
+                                samesite="lax", path="/platform/oauth", max_age=3600)
+            return response
+        if action in self.LOGIN_ACTIONS:
+            return await self._login_action(action, body, browser_key, None)
+        session = self.store.get("browser", browser_key)
+        if not session:
+            raise AccountError("请先登录你的 Lynse 账号。")
+        authorization_id = body.get("authorization_id", "")
+        if not isinstance(authorization_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", authorization_id):
+            raise AccountError("授权记录不存在。")
+        with self.store.transaction() as db:
+            record = self.store.read(db, "authorization", authorization_id)
+            if not record or record["subject"] != session["subject"]:
+                raise AccountError("授权记录不存在。")
+            active = record["status"] == "valid" and record["grant_expires"] > time.time()
+            if action == "authorization-revoke":
+                if not active:
+                    raise AccountError("该授权已失效，无需撤销。")
+                self.provider._revoke_grant(db, authorization_id)
+            elif active:
+                raise AccountError("请先撤销授权，再删除该记录。")
+            else:
+                self.store.delete(db, "authorization", authorization_id)
+        return JSONResponse({"ok": True})
 
     def _save_session(self, key, session):
         session = session | {"expires": time.time() + session["lifetime"]}
@@ -462,8 +571,9 @@ def create_app(settings: Settings, backend=None):
     if settings.test_ui:
         from lynse_test_client import PATH, TestOAuthClient
         client = TestOAuthClient(provider)
-        for path in (PATH, PATH + "/", PATH + "/start", PATH + "/callback"):
+        for path in (PATH, PATH + "/", PATH + "/start", PATH + "/callback", PATH + "/authorizations"):
             server.custom_route(path, methods=["GET"])(client.handle)
+        server.custom_route(PATH + "/authorizations/{op}", methods=["POST"])(client.handle)
     async def health(request):
         return JSONResponse({"status": "ok"})
     server.custom_route("/health", methods=["GET"])(health)

@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import logging
 from pathlib import Path
+import re
 import tempfile
 import time
 import unittest
@@ -17,6 +18,7 @@ from lynse_account import AccountBackend, AccountLynseAPI
 from lynse import LynseAPIError
 from lynse_remote import API_PATH, Settings, create_app
 from lynse_oauth_store import fingerprint
+from lynse_test_client import TestOAuthClient
 
 RESOURCE = 'https://mcp.lynse.cn/mcp'
 WEB = 'https://www.lynse.cn'
@@ -475,6 +477,141 @@ class AccountOAuthTests(unittest.TestCase):
         disabled = TestClient(create_app(replace(self.settings, test_ui=False), self.backend), base_url=WEB)
         self.assertEqual(disabled.get('/platform/oauth/test').status_code, 404)
         disabled.close()
+
+    def console_browser(self, phone):
+        """Ticketless console login on a fresh browser; returns (client, csrf)."""
+        browser = TestClient(self.app, base_url=WEB)
+        data = browser.get(API_PATH + '/authorizations').json()
+        self.assertIsNone(data['user'])
+        self.assertEqual(data['authorizations'], [])
+        csrf = data['csrf']
+        login = browser.post(API_PATH + '/phone-login', json={'phone': phone, 'code': '123456'},
+                             headers={'Origin': WEB, 'X-MCP-CSRF': csrf})
+        self.assertEqual(login.status_code, 200, login.text)
+        return browser, browser.get(API_PATH + '/authorizations').json()['csrf']
+
+    def test_authorization_records_list_revoke_and_isolation(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        console, csrf = self.console_browser('13900000001')
+        listed = console.get(API_PATH + '/authorizations').json()
+        self.assertEqual(listed['user']['name'], 'User 0001')
+        record = listed['authorizations'][0]
+        self.assertEqual((record['client_name'], record['client_id'], record['status'],
+                          record['grant_type'], record['scopes']), ('Test Client', flow['client']['client_id'],
+                          'valid', 'oauth', ['lynse:read']))
+        self.assertNotIn('private-upstream', console.get(API_PATH + '/authorizations').text)
+        # Ticketless login still enforces origin and browser CSRF.
+        for headers in ({'Origin': WEB, 'X-MCP-CSRF': 'forged'}, {'Origin': 'https://evil.test', 'X-MCP-CSRF': 'forged'}):
+            body = {'phone': '13900000002', 'code': '123456'}
+            self.assertEqual(console.post(API_PATH + '/phone-login', json=body, headers=headers).status_code, 403)
+        # Another account sees no records and cannot revoke or delete foreign ones.
+        other, other_csrf = self.console_browser('13900000002')
+        self.assertEqual(other.get(API_PATH + '/authorizations').json()['authorizations'], [])
+        for action in ('authorization-revoke', 'authorization-delete'):
+            self.assertEqual(other.post(API_PATH + '/' + action, json={'authorization_id': record['authorization_id']},
+                headers={'Origin': WEB, 'X-MCP-CSRF': other_csrf}).status_code, 400)
+        # Revoking requires the console browser CSRF and ends every token of the grant.
+        self.assertEqual(console.post(API_PATH + '/authorization-revoke',
+            json={'authorization_id': record['authorization_id']},
+            headers={'Origin': WEB, 'X-MCP-CSRF': 'forged'}).status_code, 403)
+        revoke = console.post(API_PATH + '/authorization-revoke',
+            json={'authorization_id': record['authorization_id']},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf})
+        self.assertEqual(revoke.status_code, 200, revoke.text)
+        self.assertIsNone(asyncio.run(self.app.state.oauth_provider.verify_token(tokens['access_token'])))
+        refreshed = self.client.post('/token', data={'client_id': flow['client']['client_id'],
+            'grant_type': 'refresh_token', 'refresh_token': tokens['refresh_token'], 'resource': RESOURCE})
+        self.assertEqual(refreshed.json()['error'], 'invalid_grant')
+        listed = console.get(API_PATH + '/authorizations').json()['authorizations']
+        self.assertEqual(listed[0]['status'], 'revoked')
+        self.assertEqual(console.post(API_PATH + '/authorization-revoke',
+            json={'authorization_id': record['authorization_id']},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 400)
+        # A revoked record can be deleted and then disappears from the list.
+        self.assertEqual(console.post(API_PATH + '/authorization-delete',
+            json={'authorization_id': record['authorization_id']},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 200)
+        self.assertEqual(console.get(API_PATH + '/authorizations').json()['authorizations'], [])
+        console.close()
+        other.close()
+
+    def test_rfc7009_revocation_marks_record_and_expiry_delete(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        provider = self.app.state.oauth_provider
+        grant_id = asyncio.run(provider.verify_token(tokens['access_token'])).claims['grant_id']
+        self.assertEqual(self.client.post('/revoke', data={'client_id': flow['client']['client_id'],
+            'token': tokens['refresh_token']}).status_code, 200)
+        # self.web is already logged in from the consent flow.
+        data = self.web.get(API_PATH + '/authorizations').json()
+        self.assertEqual(data['user']['name'], 'User 0001')
+        record = data['authorizations'][0]
+        self.assertEqual(record['status'], 'revoked')
+        self.assertEqual(record['authorization_id'], grant_id)
+
+    def test_expired_authorization_shows_status_and_allows_delete(self):
+        flow = self.grant()
+        tokens = self.exchange(flow).json()
+        provider = self.app.state.oauth_provider
+        grant_id = asyncio.run(provider.verify_token(tokens['access_token'])).claims['grant_id']
+        grant_expires = provider.store.get('authorization', grant_id)['grant_expires']
+        # The login session is gone by the time the record expires; re-login on the console.
+        with patch('time.time', return_value=grant_expires + 1):
+            console, csrf = self.console_browser('13900000001')
+            data = console.get(API_PATH + '/authorizations').json()
+            self.assertEqual(data['authorizations'][0]['status'], 'expired')
+            self.assertEqual(console.post(API_PATH + '/authorization-delete',
+                json={'authorization_id': grant_id},
+                headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 200)
+            console.close()
+        self.assertEqual(self.web.get(API_PATH + '/authorizations').json()['authorizations'], [])
+        # a still-valid record cannot be deleted directly
+        flow = self.grant(client=flow['client'])
+        tokens = self.exchange(flow).json()
+        grant_id = asyncio.run(provider.verify_token(tokens['access_token'])).claims['grant_id']
+        csrf = self.web.get(API_PATH + '/authorizations').json()['csrf']
+        self.assertEqual(self.web.post(API_PATH + '/authorization-delete',
+            json={'authorization_id': grant_id},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 400)
+
+    def test_console_requires_login_for_record_actions(self):
+        anonymous = TestClient(self.app, base_url=WEB)
+        csrf = anonymous.get(API_PATH + '/authorizations').json()['csrf']
+        for action in ('authorization-revoke', 'authorization-delete'):
+            self.assertEqual(anonymous.post(API_PATH + '/' + action, json={'authorization_id': 'a' * 43},
+                headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 400)
+        # consent still requires a ticket
+        self.assertEqual(anonymous.post(API_PATH + '/consent', json={'decision': 'allow'},
+            headers={'Origin': WEB, 'X-MCP-CSRF': csrf}).status_code, 400)
+        anonymous.close()
+
+    def test_console_test_ui_page_lists_and_revokes(self):
+        flow = self.grant()
+        token = self.exchange(flow).json()['access_token']
+
+        def forward(method, action, request, form=None, csrf=""):
+            headers = {'Origin': WEB, 'X-MCP-CSRF': csrf} if csrf else {'Origin': WEB}
+            if method == 'GET':
+                return self.web.get(API_PATH + '/' + action, headers=headers)
+            return self.web.post(API_PATH + '/' + action, json=form, headers=headers)
+
+        with patch.object(TestOAuthClient, '_api', side_effect=forward):
+            page = self.web.get('/platform/oauth/test/authorizations')
+            self.assertEqual(page.status_code, 200, page.text)
+            self.assertIn('当前账号', page.text)
+            self.assertIn('Test Client', page.text)
+            self.assertIn('撤销授权', page.text)
+            csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+            grant_id = re.search(r'name="authorization_id" value="([^"]+)"', page.text).group(1)
+            submitted = self.web.post('/platform/oauth/test/authorizations/revoke',
+                                      data={'csrf': csrf, 'authorization_id': grant_id}, follow_redirects=False)
+            self.assertEqual(submitted.status_code, 303, submitted.text)
+            refreshed = self.web.get(submitted.headers['location'])
+            self.assertIn('已撤销', refreshed.text)
+            self.assertIn('已吊销', refreshed.text)
+            self.assertIn('删除', refreshed.text)
+        self.assertIsNone(asyncio.run(self.app.state.oauth_provider.verify_token(token)))
 
 
 if __name__ == '__main__':

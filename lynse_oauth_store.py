@@ -52,6 +52,14 @@ class OAuthStore:
             raise ValueError("OAuth storage integrity check failed")
         return envelope["value"]
 
+    def scan(self, db, kind: str):
+        """Yield (id, value) for every stored record of a kind, including
+        records whose business lifetime ended; row expiry is only retention."""
+        for key, blob in db.execute("SELECT id, payload FROM records WHERE kind=?", (kind,)):
+            envelope = json.loads(self.cipher.decrypt(blob))
+            if envelope["kind"] == kind and envelope["id"] == key:
+                yield key, envelope["value"]
+
     def write(self, db, kind: str, key: str, value: dict, expires: float):
         payload = self.cipher.encrypt(json.dumps(
             {"kind": kind, "id": key, "value": value}, separators=(",", ":")
