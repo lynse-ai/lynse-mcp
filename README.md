@@ -1,10 +1,12 @@
 # Lynse MCP
 
-灵光记的会议、音频、文件夹和待办工具，当前版本 `0.0.4`。保留远程账号授权与本地 stdio 两种方式；Lynse API 客户端复用 `lynse-cli`，不在此仓库复制。
+灵光记的会议、音频、文件夹和待办工具，当前版本 `0.2.0`。保留远程账号授权与本地 stdio 两种方式；Lynse API 客户端复用 `lynse-cli`，不在此仓库复制。
 
 ## 远程接入
 
 国内正式入口已部署为 `https://www.lynse.cn/mcp`，连接 `api.lynse.cn` 正式账号系统；`https://www.lynse.ai/mcp` 连接 `gapp.lynse.cn` 测试账号系统。远程模式使用 Streamable HTTP + OAuth，用户在官网登录并授权，客户端无需安装 Python 或 Node。
+
+用户在官网登录后可在「我的授权」控制台查看和管理已授权的 MCP 应用：有效授权可随时撤销（立即终止该连接的全部 Token），已吊销/已过期记录保留展示直至手动删除。浏览器走 `/platform/oauth/api/*` 桥接接口，契约见 [应用授权记录桥接 API](docs/authorization-records-api.md)；`LYNSE_MCP_TEST_UI=1` 时服务在 `/platform/oauth/test/authorizations` 提供等价的自测管理页。
 
 ### Codex
 
