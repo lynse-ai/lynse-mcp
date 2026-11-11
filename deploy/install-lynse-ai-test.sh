@@ -31,7 +31,7 @@ else:
 print('Test environment prepared; encryption key retained privately')
 PY
 docker compose -p lynse-mcp-ai-test -f deploy/compose-lynse-ai-test.yml config --quiet
-if ! docker compose -p lynse-mcp-ai-test -f deploy/compose-lynse-ai-test.yml build > build.log 2>&1; then
+if ! docker compose -p lynse-mcp-ai-test -f deploy/compose-lynse-ai-test.yml build --no-cache > build.log 2>&1; then
     tail -50 build.log
     exit 1
 fi
