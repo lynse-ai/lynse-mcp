@@ -158,7 +158,9 @@ class AccountOAuthProvider:
         value = self.store.get("code", fingerprint(code))
         if not value or value["client_id"] != client.client_id:
             return None
-        return GrantCode(code=code, **value)
+        # `token_response` is our internal idempotency cache, not an OAuth field.
+        return GrantCode(code=code, **{k: v for k, v in value.items()
+                                      if k != "token_response"})
 
     def _issue(self, db, client_id, grant_id, scopes):
         grant = self.store.read(db, "grant", grant_id)
@@ -187,8 +189,25 @@ class AccountOAuthProvider:
             value = self.store.read(db, "code", key)
             if not value or value["client_id"] != client.client_id:
                 raise TokenError("invalid_grant", "Authorization code already used or expired")
-            self.store.delete(db, "code", key)
-            return self._issue(db, client.client_id, value["grant_id"], value["scopes"])
+            replay = value.get("token_response")
+            if replay is not None:
+                # A custom-scheme callback (workbuddy://...) can be delivered more
+                # than once: the consent page has both an auto-redirect timer and a
+                # manual "continue" button, and macOS may forward the deep link
+                # twice. The SDK has already re-verified client_id, PKCE,
+                # redirect_uri and expiry before getting here. Replaying the exact
+                # token bundle from the first exchange makes the duplicate callback
+                # harmless instead of letting "code does not exist" make the client
+                # discard the credentials it just stored. No new token is minted,
+                # the window is bounded by the code's original 120s lifetime, and
+                # a revoked or expired grant still fails closed.
+                if not self.store.read(db, "grant", value["grant_id"]):
+                    raise TokenError("invalid_grant", "Authorization expired; sign in again")
+                return OAuthToken.model_validate(replay)
+            token = self._issue(db, client.client_id, value["grant_id"], value["scopes"])
+            value["token_response"] = token.model_dump(mode="json")
+            self.store.write(db, "code", key, value, value["expires_at"])
+            return token
 
     async def load_refresh_token(self, client, refresh_token: str):
         key = fingerprint(refresh_token)

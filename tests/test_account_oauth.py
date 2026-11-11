@@ -169,13 +169,38 @@ class AccountOAuthTests(unittest.TestCase):
         self.assertEqual(self.exchange(flow, redirect_uri='https://attacker.test').json()['error'], 'invalid_request')
         r = self.exchange(flow)
         self.assertEqual(r.status_code, 200, r.text)
-        token = r.json()['access_token']
-        self.assertEqual(self.exchange(flow).json()['error'], 'invalid_grant')
+        first = r.json()
+        token = first['access_token']
+        # A duplicate callback for the same code replays the identical token
+        # bundle: no new token is minted, and the client keeps its credentials.
+        replay = self.exchange(flow)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json(), first)
         access = asyncio.run(self.app.state.oauth_provider.verify_token(token))
         self.assertEqual(access.subject, '13900000001')
         self.assertNotIn('private-upstream', r.text)
         self.assertNotIn(b'private-upstream', self.db.read_bytes())
         self.assertNotIn(token.encode(), self.db.read_bytes())
+
+    def test_code_replay_is_client_scoped_and_revocation_still_fails_closed(self):
+        flow = self.grant()
+        first = self.exchange(flow)
+        self.assertEqual(first.status_code, 200, first.text)
+        token, refresh = first.json()['access_token'], first.json()['refresh_token']
+
+        # Idempotency never crosses clients: a different registered client cannot
+        # replay a code that belongs to this one.
+        foreign = self.register(redirect='http://127.0.0.1:9877/callback')
+        bad = self.exchange(flow, client_id=foreign['client_id'])
+        self.assertEqual(bad.json()['error'], 'invalid_grant', bad.text)
+
+        # Revoking the grant kills the cached replay and the live token.
+        revoke = self.client.post('/revoke', data={'client_id': flow['client']['client_id'],
+                                                   'token': refresh})
+        self.assertEqual(revoke.status_code, 200, revoke.text)
+        denied = self.exchange(flow)
+        self.assertEqual(denied.json()['error'], 'invalid_grant', denied.text)
+        self.assertIsNone(asyncio.run(self.app.state.oauth_provider.verify_token(token)))
 
     def test_browser_binding_csrf_and_denial(self):
         flow = self.start()
