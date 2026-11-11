@@ -4,7 +4,7 @@ ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 COPY requirements.txt requirements-mcp.txt requirements-remote.txt ./
 COPY vendor/lynse_cli-*.whl vendor/lynse-cli-source.json vendor/
 COPY scripts/vendor_cli.py scripts/
-# Verify the wheel against the pinned source revision; no Git/apt access on ECS.
+# Verify the prebuilt CLI wheel before installing on ECS.
 RUN python scripts/vendor_cli.py use \
     && python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements-remote.txt

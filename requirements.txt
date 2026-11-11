@@ -1,2 +1,2 @@
 requests>=2.28.0
-lynse-cli @ git+https://github.com/lynse-ai/lynse-cli.git@52c604f1343c196496cce91629a872e947c08256
+lynse-cli @ git+https://github.com/lynse-ai/lynse-cli.git@main
