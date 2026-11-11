@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
+import json
 import re
 import sys
 from typing import Annotated, Any, Callable, Literal
@@ -28,7 +30,7 @@ from pydantic import Field
 from lynse import LynseAPI, LynseAPIError, TRANSCRIPTION_OPERATIONS
 from lynse_auth import LocalAuthFlow, auth_status
 
-MCP_VERSION = "0.0.4"
+MCP_VERSION = "0.2.1"
 
 
 Days = Annotated[int, Field(ge=1, le=3650, description="Number of recent days to query.")]
@@ -46,6 +48,96 @@ PROFILE_FIELDS = frozenset({
     "registrationTime", "isActive", "pointsAmount", "usedPointsAmount",
     "benefitType", "teamId",
 })
+
+# get_meeting returns only the meeting conclusion by default. Long AI output
+# (mind maps, outlines, full transcripts) has to be requested explicitly and is
+# capped so one tool result cannot exhaust an agent's context window.
+MEETING_MAX_CHARS_DEFAULT = 8_000
+MEETING_MAX_CHARS_LIMIT = 50_000
+CONCLUSION_TEXT_KEYS = ("conclusionText", "content", "conclusion", "summary", "markdown")
+# Lynse embeds the mind map as a base64 PNG inside the conclusion markdown. It is
+# binary payload an agent cannot use, and it dominates the response (100k+ chars),
+# so it is replaced with a short marker before any length accounting.
+INLINE_DATA_IMAGE = re.compile(r"!\[[^\]]*\]\(data:image/[^)]*\)")
+MeetingContent = Literal["conclusion", "summary", "info", "outline", "transcript"]
+MeetingMaxChars = Annotated[
+    int, Field(ge=500, le=MEETING_MAX_CHARS_LIMIT,
+               description="Maximum characters of meeting content to return per call.")
+]
+MeetingOffset = Annotated[
+    int, Field(ge=0, description="Character offset for reading the next chunk of long content.")
+]
+
+
+def _conclusion_text(data: Any) -> str | None:
+    """Pull the prose out of a conclusion record, mirroring lynse-cli's summary formatter."""
+    if isinstance(data, dict):
+        for key in CONCLUSION_TEXT_KEYS:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return None
+
+
+def _strip_inline_images(value: Any) -> Any:
+    """Replace inline base64 images so binary payloads cannot dominate a result."""
+    if isinstance(value, str):
+        return INLINE_DATA_IMAGE.sub("[inline image omitted]", value)
+    if isinstance(value, dict):
+        return {key: _strip_inline_images(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_inline_images(item) for item in value]
+    return value
+
+
+def _supports_mind_map_flag(api: LynseAPI) -> bool:
+    """Older lynse-cli wheels lack include_mind_map; keep get_meeting deployable on both."""
+    try:
+        params = inspect.signature(api.get_conclusion).parameters
+    except (TypeError, ValueError):
+        return False
+    return "include_mind_map" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def _limit_meeting_content(
+    result: dict[str, Any], *, content: str, file_id: str, max_chars: int, offset: int
+) -> dict[str, Any]:
+    """Cap the serialized `data` payload and expose offset-based pagination."""
+    if not isinstance(result, dict):
+        result = {"code": 200, "data": result}
+    data = result.get("data")
+    payload = data if isinstance(data, str) else json.dumps(
+        data, ensure_ascii=False, separators=(",", ":"), default=str
+    )
+    total_chars = len(payload)
+    meta = {
+        "content": content,
+        "file_id": file_id,
+        "max_chars": max_chars,
+        "offset": offset,
+        "total_chars": total_chars,
+    }
+    if offset == 0 and total_chars <= max_chars:
+        return {**result, **meta, "truncated": False}
+    chunk = payload[offset:offset + max_chars]
+    next_offset = offset + len(chunk)
+    has_more = next_offset < total_chars
+    return {
+        **result,
+        "data": chunk,
+        **meta,
+        "returned_chars": len(chunk),
+        "truncated": True,
+        "next_offset": next_offset if has_more else None,
+        "hint": (
+            f"Content is longer than max_chars. Call get_meeting again with the same "
+            f"content='{content}' and offset={next_offset} to read the next chunk, "
+            f"or increase max_chars (up to {MEETING_MAX_CHARS_LIMIT})."
+            if has_more else "Reached the end of the content. Use offset=0 to read it again."
+        ),
+    }
 
 
 def _check_oss_audio(url: str) -> None:
@@ -250,17 +342,74 @@ class LynseMCPTools:
         self,
         ctx: Context,
         file_id: Identifier,
-        content: Literal["info", "summary", "outline", "transcript"] = "info",
+        content: MeetingContent = "conclusion",
+        *,
+        all_conclusions: bool = False,
+        include_mind_map: bool = False,
+        max_chars: MeetingMaxChars = MEETING_MAX_CHARS_DEFAULT,
+        offset: MeetingOffset = 0,
     ) -> dict[str, Any]:
-        """Get meeting details, summary, outline, or plain-text transcript."""
+        """Read one kind of meeting content; by default only the conclusion prose.
+
+        `content` selects the payload: conclusion (default: first conclusion only,
+        no mind map), info, outline, or transcript. `summary` remains an alias for
+        `conclusion`. Use `all_conclusions` / `include_mind_map` to opt into the
+        larger conclusion payloads. Every result is capped at `max_chars`; when
+        `truncated` is true, follow `next_offset` with the same arguments to page
+        through the rest instead of raising the limit blindly.
+        """
         await self._ensure_authorized(ctx)
-        operations = {
-            "info": self.api.get_file_info,
-            "summary": self.api.get_conclusion,
-            "outline": self.api.get_outline,
-            "transcript": self.api.get_transcription_text,
-        }
-        return await self._call(operations[content], file_id)
+        if content in ("conclusion", "summary"):
+            kwargs: dict[str, Any] = {"first_only": not all_conclusions}
+            if _supports_mind_map_flag(self.api):
+                kwargs["include_mind_map"] = include_mind_map
+            result = await self._call(self.api.get_conclusion, file_id, **kwargs)
+        else:
+            operations = {
+                "info": self.api.get_file_info,
+                "outline": self.api.get_outline,
+                "transcript": self.api.get_transcription_text,
+            }
+            result = await self._call(operations[content], file_id)
+        data = _strip_inline_images(result.get("data") if isinstance(result, dict) else None)
+        if content in ("conclusion", "summary") and not all_conclusions:
+            prose = _conclusion_text(data)
+            if prose is not None:
+                data = prose
+        return _limit_meeting_content(
+            {**result, "data": data} if isinstance(result, dict) else {"code": 200, "data": data},
+            content=content, file_id=file_id, max_chars=max_chars, offset=offset,
+        )
+
+    async def get_meeting_marks(self, ctx: Context, file_id: Identifier) -> dict[str, Any]:
+        """Get playback offsets, text marks and mark images for a recording by file ID."""
+        await self._ensure_authorized(ctx)
+        return await self._call(self.api.get_recording_marks, file_id)
+
+    async def list_mark_images(self, ctx: Context, md5: Identifier) -> dict[str, Any]:
+        """List mark image records by the recording's MD5 hash, including image IDs."""
+        await self._ensure_authorized(ctx)
+        return await self._call(self.api.list_mark_images, md5)
+
+    async def get_mark_image(self, ctx: Context, image_id: Identifier) -> CallToolResult:
+        """Get a temporary signed resource link for a private mark image by image ID."""
+        await self._ensure_authorized(ctx)
+        result = await self._call(self.api.get_mark_image_url, image_id)
+        url = result.get("data")
+        try:
+            parsed = urlsplit(url) if isinstance(url, str) else None
+            if (not parsed or parsed.scheme != "https" or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None):
+                raise ValueError
+        except ValueError:
+            raise ValueError("Lynse did not return a valid HTTPS link for this mark image.") from None
+        resource = ResourceLink(
+            type="resource_link",
+            name=f"mark-image-{image_id}",
+            uri=url,
+            description="Lynse mark image. Call get_mark_image again when the signed link expires.",
+        )
+        return CallToolResult(content=[resource], structured_content=result)
 
     async def get_meeting_audio(
         self,
@@ -449,15 +598,21 @@ def create_server(
     **server_options: Any,
 ) -> MCPServer:
     """Create a Lynse MCP server, optionally with an injected API for tests."""
+    # Report the released version in initialize/serverInfo instead of the SDK's empty default.
+    server_options.setdefault("version", MCP_VERSION)
     server = MCPServer(
         "lynse-mcp",
         instructions=(
             "Use the authenticated user's Lynse account within the granted scopes. "
+            "get_meeting returns only the meeting conclusion by default; request info, "
+            "outline or transcript explicitly and page long results with offset. "
             "Before a write or deletion, explain the exact change and obtain confirmation. "
             "If authentication expires, reconnect through the website's OAuth flow."
         ) if remote else (
             "Access the user's Lynse meetings, audio files, summaries, transcripts, "
-            "folders, and todos. "
+            "recording marks, mark images, folders, and todos. "
+            "get_meeting returns only the conclusion by default; use its content and "
+            "offset arguments for other or longer payloads. "
             "On first use, check authorization status. If credentials are missing, call "
             "authorize_lynse so the user can enter the Key through a secure local browser page. "
             "To replace a configured Key, explain that the validated replacement will overwrite "
@@ -480,6 +635,9 @@ def create_server(
     server.tool(title="Get Lynse meeting audio file", annotations=READ_ONLY)(
         tools.get_meeting_audio
     )
+    server.tool(title="Get Lynse recording marks", annotations=READ_ONLY)(tools.get_meeting_marks)
+    server.tool(title="List Lynse mark images by MD5", annotations=READ_ONLY)(tools.list_mark_images)
+    server.tool(title="Get Lynse mark image link", annotations=READ_ONLY)(tools.get_mark_image)
     for operation in TRANSCRIPTION_OPERATIONS.values():
         server.tool(name=operation['mcp_tool'], title=operation['title'],
                     annotations=WRITE if operation['write'] else READ_ONLY)(

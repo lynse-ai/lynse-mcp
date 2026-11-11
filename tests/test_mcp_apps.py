@@ -73,7 +73,9 @@ class MCPAppsTests(unittest.TestCase):
         self.assertEqual(result.structured_content["meetings"][0]["duration"], 0)
         result = self.run_client(lambda c: c.call_tool("read_meeting_view", {"file_id": "file-1", "content": "summary"}))
         self.assertEqual(result.structured_content["text"], "Summary prose")
-        self.api.get_conclusion.assert_called_once_with("file-1")
+        self.api.get_conclusion.assert_called_once_with(
+            "file-1", first_only=True, include_mind_map=False
+        )
 
     def test_real_api_summary_and_outline_fields_render_body_without_internal_metadata(self):
         self.api.get_conclusion.return_value = {"code": 200, "data": [
