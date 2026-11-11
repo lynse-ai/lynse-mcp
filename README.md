@@ -1,6 +1,6 @@
 # Lynse MCP
 
-灵光记的会议、音频、文件夹和待办工具，当前版本 `0.2.0`。保留远程账号授权与本地 stdio 两种方式；Lynse API 客户端复用 `lynse-cli`，不在此仓库复制。
+灵光记的会议、音频、文件夹和待办工具，当前版本 `0.2.1`。保留远程账号授权与本地 stdio 两种方式；Lynse API 客户端复用 `lynse-cli`，不在此仓库复制。
 
 ## 远程接入
 
@@ -98,6 +98,7 @@ Lynse Desktop 已加入 **设置 → AI 助手 → MCP 连接** 开关，重新�
 - 授权：`get_auth_status`；本地另有 `authorize_lynse`、`reset_lynse_key`。
 - 读取：用户、会议列表/搜索/详情/总结/大纲/转写、文件夹和待办。
 - 音频：`get_meeting_audio` 返回预签名资源链接，过期后重新调用，不嵌入长音频。
+- 标记：`get_meeting_marks(file_id)` 获取录音标记和图片记录。只有录音 MD5 时，用 `list_mark_images(md5)` 查询图片。私有图片用 `get_mark_image(image_id)` 换取临时资源链接。
 - 整理：先调用只读的 `plan_meeting_organization`，确认后再执行 `apply_meeting_organization`。
 - 写入：创建文件夹、移动会议、删除待办均需 `confirm=true`。
 
@@ -135,7 +136,7 @@ Lynse Desktop 已加入 **设置 → AI 助手 → MCP 连接** 开关，重新�
 ## 云端录音转写
 
 CLI 和 MCP 使用 `lynse-cli` 中同一份 API 客户端与 `TRANSCRIPTION_OPERATIONS` 接口定义。
-本次依赖固定到 CLI 提交 `52c604f1343c196496cce91629a872e947c08256`，避免安装后加载旧客户端副本；没有发布新的 npm 版本。
+MCP 安装时从 CLI 仓库的 `main` 获取当前代码。CLI 和 MCP 一起开发时，先将 CLI 接口合入 `main`，再构建 MCP。
 
 | MCP 工具 | CLI 命令 | 行为 |
 | --- | --- | --- |
@@ -155,5 +156,6 @@ CLI 与 MCP 默认共用 `~/.lynse/auto-transcribe/` 下按账户及 API 地址�
 MCP 客户端不能指定服务器状态文件路径；工具结果隐藏服务器路径和上游错误诊断正文。
 
 协议测试检查 MCP 注册名称、读写声明、参数签名和批量上限与 CLI 的共享定义一致。
-更新接口时先修改 CLI 并提交，然后更新 `requirements.txt` 的 CLI 提交固定值，运行双方测试。
-本地开发可使用 `python3 -m pip install -e ../lynse-cli`，不复制 `lynse.py` 到 MCP 仓库。
+本地开发可使用 `python3 -m pip install -e ../lynse-cli` 联调两个仓库。
+已安装的 MCP 可用 `python3 -m pip install --force-reinstall --no-deps "lynse-cli @ git+https://github.com/lynse-ai/lynse-cli.git@main"` 刷新 CLI 后重启。
+重新构建在线镜像时用 `docker compose build --no-cache` 刷新 Git 依赖。国内镜像在打包机执行 `python3 scripts/vendor_cli.py prepare`，每次取当前 `main` 并记录来源提交与 wheel 校验和，供 ECS 离线安装。

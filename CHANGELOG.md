@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 (2026-11-11)
+
+### New Features
+
+- Add three recording-mark tools: `get_meeting_marks` (playback offsets, text marks and mark images for a recording), `list_mark_images` (mark images by recording MD5) and `get_mark_image` (temporary signed resource link), backed by the new lynse-cli mark APIs.
+
+### Changed
+
+- `get_meeting` now returns only the meeting conclusion by default (`content="conclusion"`, first conclusion, no mind map) instead of file info, and exposes `all_conclusions`, `include_mind_map`, `max_chars` and `offset` so other payloads are requested explicitly and long ones page through.
+- Cap every `get_meeting` result at `max_chars` (8,000 by default, 50,000 maximum) and replace inline base64 images — the conclusion's embedded mind-map PNG — with `[inline image omitted]`; one 99-minute meeting drops from ~147k characters to ~6k.
+- Build the vendored lynse-cli wheel from a local checkout with `scripts/vendor_cli.py prepare --worktree`, recording the worktree delta fingerprint next to the source revision.
+
+### Fixed
+
+- Report the released version in the MCP `initialize` handshake (`serverInfo.version`) instead of the SDK's empty default.
+- Replay a duplicate authorization-code exchange idempotently: a `workbuddy://` callback delivered twice now returns the same token bundle instead of `invalid_grant`, while a different client, a revoked grant and an expired code still fail closed.
+
 ## 0.2.0 (2026-11-09)
 
 ### New Features
