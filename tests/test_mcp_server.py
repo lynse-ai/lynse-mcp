@@ -1,8 +1,10 @@
 import asyncio
 import json
-from pathlib import Path
+import os
 import unittest
+import urllib.request
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
@@ -10,6 +12,7 @@ import requests
 from mcp import Client
 
 from lynse import CLI_VERSION, LynseAPI
+from lynse_auth import LocalAuthFlow, _default_api_host
 from lynse_mcp import LynseMCPTools, MCP_VERSION, create_server
 
 
@@ -479,6 +482,33 @@ class LynseMCPToolTests(unittest.TestCase):
         self.assertEqual(result["data"]["fileName"], "meeting.wav")
         self.assertEqual(result["data"]["mimeType"], "audio/wav")
         self.assertEqual(result["data"]["size"], 4096)
+
+
+class DefaultApiHostTests(unittest.TestCase):
+    def test_defaults_to_deployed_gateway(self):
+        with patch.dict(os.environ):
+            os.environ.pop("LYNSE_API_HOST", None)
+            self.assertEqual(_default_api_host(), "https://gapp.lynse.cn")
+
+    def test_environment_overrides_default(self):
+        with patch.dict(os.environ, {"LYNSE_API_HOST": "https://gapp-staging.lynse.cn"}):
+            self.assertEqual(_default_api_host(), "https://gapp-staging.lynse.cn")
+
+    def test_authorize_form_prefills_default_host(self):
+        flow = LocalAuthFlow()
+        flow.start()
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(flow.url, timeout=5) as response:
+                form = response.read().decode("utf-8")
+        finally:
+            flow.stop()
+        self.assertIn("https://gapp.lynse.cn", form)
+        self.assertNotIn("https://api.lynse.cn", form)
+
+    def test_stop_is_safe_without_start(self):
+        flow = LocalAuthFlow()
+        flow.stop()  # must not hang or raise even though start() was never called
 
 
 if __name__ == "__main__":

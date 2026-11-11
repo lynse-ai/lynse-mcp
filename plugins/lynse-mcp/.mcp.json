@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "lynse": {
+      "type": "http",
+      "url": "https://www.lynse.cn/mcp",
+      "enabled": true,
+      "timeoutMs": 60000
+    }
+  }
+}

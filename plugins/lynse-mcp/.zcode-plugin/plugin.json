@@ -1,0 +1,23 @@
+{
+  "name": "lynse-mcp",
+  "description": "Connect AI agents to Lynse (灵光记) meetings, summaries, transcripts, audio, folders, and todos through a secure OAuth-protected remote MCP server.",
+  "description_i18n": {
+    "en": "Connect AI agents to Lynse (灵光记) meetings, summaries, transcripts, audio, folders, and todos through a secure OAuth-protected remote MCP server.",
+    "zh-CN": "通过 OAuth 安全远程 MCP 服务，把灵光记 Lynse 的会议、纪要、转写、音频、文件夹和待办接入 AI Agent。"
+  },
+  "version": "0.1.1",
+  "author": {
+    "name": "lynse.ai",
+    "url": "https://www.lynse.ai"
+  },
+  "keywords": [
+    "lynse",
+    "mcp",
+    "meetings",
+    "transcription",
+    "todos",
+    "oauth"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills"
+}

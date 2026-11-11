@@ -15,7 +15,12 @@ from urllib.parse import parse_qs, urlparse
 from lynse import LynseAPI, LynseAPIError
 
 
-DEFAULT_API_HOST = "https://api.lynse.cn"
+DEFAULT_API_HOST = "https://gapp.lynse.cn"
+
+
+def _default_api_host() -> str:
+    """Gateway pre-filled on the authorize form; LYNSE_API_HOST overrides it."""
+    return os.environ.get("LYNSE_API_HOST") or DEFAULT_API_HOST
 MAX_FORM_BYTES = 16_384
 
 
@@ -161,7 +166,7 @@ button{{width:100%;margin-top:24px;padding:12px;border:0;border-radius:9px;backg
 {error_html}
 <form method="post" action="{flow._path}">
 <label for="api_host">API 地址</label>
-<input id="api_host" name="api_host" type="url" value="{DEFAULT_API_HOST}" required>
+<input id="api_host" name="api_host" type="url" value="{_default_api_host()}" required>
 <label for="api_key">授权 Key</label>
 <input id="api_key" name="api_key" type="password" autocomplete="off" required autofocus>
 <button type="submit">验证并授权</button>
@@ -230,5 +235,8 @@ button{{width:100%;margin-top:24px;padding:12px;border:0;border-radius:9px;backg
         return self._result
 
     def stop(self) -> None:
-        self._server.shutdown()
+        # shutdown() waits for serve_forever to exit; skip it when the server
+        # thread was never started, or it would block forever.
+        if self._thread.is_alive():
+            self._server.shutdown()
         self._server.server_close()

@@ -10,10 +10,12 @@
 
 - `get_meeting` now returns only the meeting conclusion by default (`content="conclusion"`, first conclusion, no mind map) instead of file info, and exposes `all_conclusions`, `include_mind_map`, `max_chars` and `offset` so other payloads are requested explicitly and long ones page through.
 - Cap every `get_meeting` result at `max_chars` (8,000 by default, 50,000 maximum) and replace inline base64 images — the conclusion's embedded mind-map PNG — with `[inline image omitted]`; one 99-minute meeting drops from ~147k characters to ~6k.
+- Include the ZCode plugin source (`plugins/lynse-mcp/`) from the 0.1.1 line: remote MCP server declaration, the bundled `lynse` usage skill and bilingual READMEs.
 - Build the vendored lynse-cli wheel from a local checkout with `scripts/vendor_cli.py prepare --worktree`, recording the worktree delta fingerprint next to the source revision.
 
 ### Fixed
 
+- Pre-fill the local authorize page with the deployed gateway (`https://gapp.lynse.cn`, override `LYNSE_API_HOST`) and make `LocalAuthFlow.stop()` safe before `start()`; both arrive with the 0.1.1 line.
 - Report the released version in the MCP `initialize` handshake (`serverInfo.version`) instead of the SDK's empty default.
 - Replay a duplicate authorization-code exchange idempotently: a `workbuddy://` callback delivered twice now returns the same token bundle instead of `invalid_grant`, while a different client, a revoked grant and an expired code still fail closed.
 
@@ -32,6 +34,19 @@
 - Extend the authorization-page cookie and browser login state to the full session lifetime (up to 24h) instead of one hour.
 - Keep DCR client records for 365 days so they outlive the grants they authorize.
 - Scale the OAuth store for many users: per-subject and consumed-token indexes replace full-table scans, token lookups no longer take the write lock, capacity raised to 500k rows, and write transactions preserve the SDK's frozen-dataclass token errors on Python 3.14.
+
+## 0.1.1 (2026-11-01)
+
+### Fixed
+
+- Pre-fill the local authorize page with the deployed gateway (`https://gapp.lynse.cn`), overridable via `LYNSE_API_HOST`; the previous `https://api.lynse.cn` default rejected valid keys with `error.api.key.invalid`.
+- Make `LocalAuthFlow.stop()` safe when called before `start()`; it previously blocked forever waiting for the server shutdown event.
+- Align the server's advertised `MCP_VERSION` with the package version (it still said 0.0.4 in 0.1.0).
+
+### Added
+
+- Ship the ZCode plugin source (`plugins/lynse-mcp/`): remote MCP server declaration for `https://www.lynse.cn/mcp`, a bundled `lynse` usage skill, and bilingual READMEs documenting the scope-gated tool set and side effects.
+- Four tests covering the gateway default, its environment override, the rendered authorize form, and the `stop()`-without-`start()` safety.
 
 ## 0.1.0 (2026-11-01)
 

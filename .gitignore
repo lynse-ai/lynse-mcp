@@ -18,3 +18,8 @@ vendor/
 .env
 .env.*
 !.env.example
+
+# ZCode local artifacts (dev marketplace, session files)
+plugins/marketplace.json
+.zcode/
+.zcodeignore
